@@ -130,6 +130,44 @@ class SERPAnalyzer:
             return "Pagina di Servizi"
             
         return None  # Usa OpenAI per casi non chiari
+    
+    def classify_page_type_gpt(self, url, title, snippet=""):
+        """Classificazione con OpenAI solo per casi complessi"""
+        # Prima prova la classificazione rule-based
+        rule_based_result = self.classify_page_type_rule_based(url, title, snippet)
+        if rule_based_result:
+            return rule_based_result
+            
+        # Cache check
+        cache_key = f"{url}_{title}"
+        if cache_key in self.classification_cache:
+            return self.classification_cache[cache_key]
+        
+        # Prompt ottimizzato per velocità
+        prompt = f"""Classifica SOLO con una di queste categorie:
+        
+URL: {url}
+Titolo: {title}
+
+Categorie: Homepage, Pagina di Categoria, Pagina Prodotto, Articolo di Blog, Pagina di Servizi, Altro
+
+Rispondi solo con la categoria."""
+
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",  # Modello più veloce ed economico
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=10,
+                temperature=0
+            )
+            result = response.choices[0].message.content.strip()
+            self.classification_cache[cache_key] = result
+            return result
+        except Exception as e:
+            st.warning(f"Errore OpenAI: {e}")
+            return "Altro"
 
     def fetch_serp_results(self, query, country="it", language="it", num_results=10):
         """Effettua la ricerca SERP tramite Serper API"""
