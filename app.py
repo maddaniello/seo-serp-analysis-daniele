@@ -1,44 +1,4 @@
-def classify_batch_openai(self, pages_data):
-        """Classificazione in batch per ridurre le chiamate API"""
-        if not pages_data or not self.use_ai or not self.client:
-            return {}
-            
-        # Raggruppa per classificazione batch
-        batch_size = min(len(pages_data), self.batch_size)
-        batch_prompt = "Classifica ogni pagina con una di queste categorie: Homepage, Pagina di Categoria, Pagina Prodotto, Articolo di Blog, Pagina di Servizi, Altro\n\n"
-        
-        for i, (url, title, snippet) in enumerate(pages_data[:batch_size]):
-            batch_prompt += f"{i+1}. URL: {url}\n   Titolo: {title}\n\n"
-        
-        batch_prompt += "Rispondi nel formato: 1. Categoria, 2. Categoria, ecc."
-        
-        try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": batch_prompt}],
-                max_tokens=100,
-                temperature=0
-            )
-            
-            # Parse della risposta batch
-            results = {}
-            response_text = response.choices[0].message.content.strip()
-            lines = response_text.split('\n')
-            
-            for i, line in enumerate(lines):
-                if str(i+1) in line and i < len(pages_data):
-                    for category in ["Homepage", "Pagina di Categoria", "Pagina Prodotto", 
-                                   "Articolo di Blog", "Pagina di Servizi", "Altro"]:
-                        if category in line:
-                            url, title, snippet = pages_data[i]
-                            cache_key = f"{url}_{title}"
-                            results[cache_key] = category
-                            break
-            
-            return results
-        except Exception as e:
-            st.warning(f"Errore batch OpenAI: {e}")
-            return {}import streamlit as st
+import streamlit as st
 import requests
 import pandas as pd
 import time
@@ -92,10 +52,34 @@ class SERPAnalyzer:
         self.openai_api_key = openai_api_key
         self.serper_url = "https://google.serper.dev/search"
         self.client = OpenAI(api_key=openai_api_key) if openai_api_key != "dummy" else None
-        self.classification_cache = {}  # Cache per classificazioni
+        self.classification_cache = {}
         self.use_ai = True
         self.batch_size = 5
+
+    def fetch_serp_results(self, query, country="it", language="it", num_results=10):
+        """Effettua la ricerca SERP tramite Serper API"""
+        headers = {
+            "X-API-KEY": self.serper_api_key,
+            "Content-Type": "application/json"
+        }
+        payload = json.dumps({
+            "q": query,
+            "num": num_results,
+            "gl": country,
+            "hl": language
+        })
         
+        try:
+            response = requests.post(self.serper_url, headers=headers, data=payload)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                st.error(f"Errore API per query '{query}': {response.status_code}")
+                return None
+        except Exception as e:
+            st.error(f"Errore di connessione: {e}")
+            return None
+
     @lru_cache(maxsize=1000)
     def classify_page_type_rule_based(self, url, title, snippet=""):
         """Classificazione veloce basata su regole per casi comuni"""
@@ -129,69 +113,7 @@ class SERPAnalyzer:
         if any(pattern in url_lower for pattern in service_patterns):
             return "Pagina di Servizi"
             
-        return None  # Usa OpenAI per casi non chiari
-    
-    def classify_page_type_gpt(self, url, title, snippet=""):
-        """Classificazione con OpenAI solo per casi complessi"""
-        # Prima prova la classificazione rule-based
-        rule_based_result = self.classify_page_type_rule_based(url, title, snippet)
-        if rule_based_result:
-            return rule_based_result
-            
-        # Cache check
-        cache_key = f"{url}_{title}"
-        if cache_key in self.classification_cache:
-            return self.classification_cache[cache_key]
-        
-        # Prompt ottimizzato per velocità
-        prompt = f"""Classifica SOLO con una di queste categorie:
-        
-URL: {url}
-Titolo: {title}
-
-Categorie: Homepage, Pagina di Categoria, Pagina Prodotto, Articolo di Blog, Pagina di Servizi, Altro
-
-Rispondi solo con la categoria."""
-
-        try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",  # Modello più veloce ed economico
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=10,
-                temperature=0
-            )
-            result = response.choices[0].message.content.strip()
-            self.classification_cache[cache_key] = result
-            return result
-        except Exception as e:
-            st.warning(f"Errore OpenAI: {e}")
-            return "Altro"
-
-    def fetch_serp_results(self, query, country="it", language="it", num_results=10):
-        """Effettua la ricerca SERP tramite Serper API"""
-        headers = {
-            "X-API-KEY": self.serper_api_key,
-            "Content-Type": "application/json"
-        }
-        payload = json.dumps({
-            "q": query,
-            "num": num_results,
-            "gl": country,
-            "hl": language
-        })
-        
-        try:
-            response = requests.post(self.serper_url, headers=headers, data=payload)
-            if response.status_code == 200:
-                return response.json()
-            else:
-                st.error(f"Errore API per query '{query}': {response.status_code}")
-                return None
-        except Exception as e:
-            st.error(f"Errore di connessione: {e}")
-            return None
+        return None
 
     def classify_page_type_gpt(self, url, title, snippet=""):
         """Classificazione con OpenAI solo per casi complessi"""
@@ -217,7 +139,7 @@ Rispondi solo con la categoria."""
 
         try:
             response = self.client.chat.completions.create(
-                model="gpt-4o-mini",  # Modello più veloce ed economico
+                model="gpt-4o-mini",
                 messages=[
                     {"role": "user", "content": prompt}
                 ],
@@ -230,6 +152,48 @@ Rispondi solo con la categoria."""
         except Exception as e:
             st.warning(f"Errore OpenAI: {e}")
             return "Altro"
+
+    def classify_batch_openai(self, pages_data):
+        """Classificazione in batch per ridurre le chiamate API"""
+        if not pages_data or not self.use_ai or not self.client:
+            return {}
+            
+        # Raggruppa per classificazione batch
+        batch_size = min(len(pages_data), self.batch_size)
+        batch_prompt = "Classifica ogni pagina con una di queste categorie: Homepage, Pagina di Categoria, Pagina Prodotto, Articolo di Blog, Pagina di Servizi, Altro\n\n"
+        
+        for i, (url, title, snippet) in enumerate(pages_data[:batch_size]):
+            batch_prompt += f"{i+1}. URL: {url}\n   Titolo: {title}\n\n"
+        
+        batch_prompt += "Rispondi nel formato: 1. Categoria, 2. Categoria, ecc."
+        
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": batch_prompt}],
+                max_tokens=100,
+                temperature=0
+            )
+            
+            # Parse della risposta batch
+            results = {}
+            response_text = response.choices[0].message.content.strip()
+            lines = response_text.split('\n')
+            
+            for i, line in enumerate(lines):
+                if str(i+1) in line and i < len(pages_data):
+                    for category in ["Homepage", "Pagina di Categoria", "Pagina Prodotto", 
+                                   "Articolo di Blog", "Pagina di Servizi", "Altro"]:
+                        if category in line:
+                            url, title, snippet = pages_data[i]
+                            cache_key = f"{url}_{title}"
+                            results[cache_key] = category
+                            break
+            
+            return results
+        except Exception as e:
+            st.warning(f"Errore batch OpenAI: {e}")
+            return {}
 
     def parse_results(self, data, query):
         """Analizza i risultati SERP con classificazione ottimizzata"""
@@ -478,7 +442,7 @@ def main():
             analyzer = SERPAnalyzer(serper_api_key, openai_api_key)
             st.info("🤖 Modalità AI attivata - Classificazione avanzata delle pagine")
         else:
-            analyzer = SERPAnalyzer(serper_api_key, "dummy")  # Dummy key se non usa AI
+            analyzer = SERPAnalyzer(serper_api_key, "dummy")
             st.info("⚡ Modalità Veloce attivata - Solo classificazione basata su regole")
         
         # Configurazioni per la velocità
