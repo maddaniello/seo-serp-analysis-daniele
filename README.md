@@ -117,7 +117,7 @@ Il tool genera report Excel con i seguenti fogli:
 - Export Excel
 - Interfaccia Streamlit
 
-💡 Raccomandazioni d'Uso
+## 💡 Raccomandazioni d'Uso
 Per Analisi Rapide (Solo Regole)
 
 Quando: Analisi esplorative, competitor overview, keyword research iniziale
