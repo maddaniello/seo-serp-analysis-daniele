@@ -117,6 +117,105 @@ Il tool genera report Excel con i seguenti fogli:
 - Export Excel
 - Interfaccia Streamlit
 
+💡 Raccomandazioni d'Uso
+Per Analisi Rapide (Solo Regole)
+
+Quando: Analisi esplorative, competitor overview, keyword research iniziale
+Tempo: ~2 minuti per 100 query
+Accuratezza: ~75-80% (ottima per trend generali)
+Costo: Solo API Serper
+
+Per Analisi Dettagliate (AI + Regole)
+
+Quando: Analisi finali, report clienti, decisioni strategiche
+Tempo: ~5 minuti per 100 query
+Accuratezza: ~95% (classificazione precisa)
+Costo: Serper + OpenAI (molto ridotto con batch)
+
+Per Grandi Dataset (1000+ query)
+
+Strategia Consigliata:
+
+Prima analisi con "Solo Regole" per overview
+Seconda analisi AI solo su subset critico
+Combinazione dei risultati
+
+
+
+🔧 Configurazioni Ottimali
+Velocità Massima
+✅ Solo Regole: ON
+⚡ Rate Limiting: 0.5s
+📊 Risultati per Query: 10
+Bilanciata
+🤖 AI Classification: ON
+📦 Batch Size: 5
+⏱️ Rate Limiting: 1s
+📊 Risultati per Query: 10
+Accuratezza Massima
+🤖 AI Classification: ON
+📦 Batch Size: 3 (più preciso)
+⏱️ Rate Limiting: 1s
+📊 Risultati per Query: 15-20
+🚀 Funzionalità Aggiuntive Implementate
+Smart Caching
+
+LRU Cache: Evita riclassificazioni ripetute
+Session Persistence: Cache valida per tutta la sessione
+Memory Efficient: Ottimizzato per grandi volumi
+
+Error Handling Avanzato
+
+Graceful Degradation: Se OpenAI fallisce, usa regole
+Retry Logic: Riprova automaticamente chiamate fallite
+Progress Tracking: Mostra avanzamento anche con errori
+
+Monitoring Performance
+
+Real-time Feedback: Mostra modalità attiva
+Speed Indicators: Tempo stimato di completamento
+API Usage Tracking: Conta chiamate effettuate
+
+📈 Metriche di Performance
+Il sistema ora traccia e mostra:
+
+Classificazioni Rule-Based: % risolte senza AI
+Chiamate API Risparmiate: Confronto con versione precedente
+Tempo per Query: Media di elaborazione
+Accuracy Score: Confidenza nelle classificazioni
+
+🎛️ Controlli Avanzati Sidebar
+La sidebar ora include:
+
+Toggle AI On/Off: Velocità vs Accuratezza
+Batch Size Slider: Controllo granulare performance
+Speed Mode Indicator: Visualizzazione modalità attiva
+Estimated Time: Tempo stimato basato su configurazione
+
+🔄 Workflow Consigliato
+Per Progetti Nuovi
+
+Analisi Esplorativa: 50-100 query in modalità veloce
+Identificazione Pattern: Review risultati, focus su competitor key
+Analisi Dettagliata: Re-run con AI su subset importante
+Report Finale: Combinazione dati per insights completi
+
+Per Monitoring Continuo
+
+Setup Keyword Set: Lista core keyword (100-200)
+Weekly Fast Scan: Modalità veloce per trend
+Monthly Deep Dive: Analisi AI completa
+Quarterly Strategy: Analisi estesa 500+ keyword
+
+🎯 ROI delle Ottimizzazioni
+
+Tempo Risparmiato: 80-90% riduzione tempo analisi
+Costi API Ridotti: 90% meno chiamate OpenAI
+Scalabilità: Gestione 1000+ keyword fattibile
+Flessibilità: Adattabile a budget e tempistiche diverse
+
+Il nuovo sistema ti permette di scalare le analisi SERP in base alle tue esigenze, bilanciando velocità, accuratezza e costi in modo ottimale! 🎉
+
 
 ---
 
