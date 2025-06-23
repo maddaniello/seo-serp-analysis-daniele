@@ -1,4 +1,44 @@
-import streamlit as st
+def classify_batch_openai(self, pages_data):
+        """Classificazione in batch per ridurre le chiamate API"""
+        if not pages_data or not self.use_ai or not self.client:
+            return {}
+            
+        # Raggruppa per classificazione batch
+        batch_size = min(len(pages_data), self.batch_size)
+        batch_prompt = "Classifica ogni pagina con una di queste categorie: Homepage, Pagina di Categoria, Pagina Prodotto, Articolo di Blog, Pagina di Servizi, Altro\n\n"
+        
+        for i, (url, title, snippet) in enumerate(pages_data[:batch_size]):
+            batch_prompt += f"{i+1}. URL: {url}\n   Titolo: {title}\n\n"
+        
+        batch_prompt += "Rispondi nel formato: 1. Categoria, 2. Categoria, ecc."
+        
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": batch_prompt}],
+                max_tokens=100,
+                temperature=0
+            )
+            
+            # Parse della risposta batch
+            results = {}
+            response_text = response.choices[0].message.content.strip()
+            lines = response_text.split('\n')
+            
+            for i, line in enumerate(lines):
+                if str(i+1) in line and i < len(pages_data):
+                    for category in ["Homepage", "Pagina di Categoria", "Pagina Prodotto", 
+                                   "Articolo di Blog", "Pagina di Servizi", "Altro"]:
+                        if category in line:
+                            url, title, snippet = pages_data[i]
+                            cache_key = f"{url}_{title}"
+                            results[cache_key] = category
+                            break
+            
+            return results
+        except Exception as e:
+            st.warning(f"Errore batch OpenAI: {e}")
+            return {}import streamlit as st
 import requests
 import pandas as pd
 import time
@@ -9,6 +49,12 @@ from openai import OpenAI
 from io import BytesIO
 import plotly.express as px
 import plotly.graph_objects as go
+import asyncio
+import aiohttp
+import concurrent.futures
+import threading
+from functools import lru_cache
+import re
 
 # Configurazione della pagina
 st.set_page_config(
@@ -45,7 +91,45 @@ class SERPAnalyzer:
         self.serper_api_key = serper_api_key
         self.openai_api_key = openai_api_key
         self.serper_url = "https://google.serper.dev/search"
-        self.client = OpenAI(api_key=openai_api_key)
+        self.client = OpenAI(api_key=openai_api_key) if openai_api_key != "dummy" else None
+        self.classification_cache = {}  # Cache per classificazioni
+        self.use_ai = True
+        self.batch_size = 5
+        
+    @lru_cache(maxsize=1000)
+    def classify_page_type_rule_based(self, url, title, snippet=""):
+        """Classificazione veloce basata su regole per casi comuni"""
+        url_lower = url.lower()
+        title_lower = title.lower()
+        snippet_lower = snippet.lower()
+        
+        # Homepage patterns
+        if (url_lower.count('/') <= 3 and 
+            ('home' in url_lower or url_lower.endswith('.com') or url_lower.endswith('.it') or
+             'homepage' in title_lower or 'home page' in title_lower)):
+            return "Homepage"
+        
+        # Product page patterns
+        product_patterns = ['product', 'prodotto', 'item', 'articolo', '/p/', 'buy', 'acquista', 'shop']
+        if any(pattern in url_lower for pattern in product_patterns):
+            return "Pagina Prodotto"
+        
+        # Category page patterns  
+        category_patterns = ['category', 'categoria', 'catalogo', 'catalog', 'collection', 'collezione', 'products', 'prodotti']
+        if any(pattern in url_lower for pattern in category_patterns):
+            return "Pagina di Categoria"
+            
+        # Blog patterns
+        blog_patterns = ['blog', 'news', 'notizie', 'articolo', 'post', 'article', '/blog/', 'magazine']
+        if any(pattern in url_lower for pattern in blog_patterns):
+            return "Articolo di Blog"
+            
+        # Services patterns
+        service_patterns = ['service', 'servizio', 'servizi', 'services', 'consulenza', 'consulting']
+        if any(pattern in url_lower for pattern in service_patterns):
+            return "Pagina di Servizi"
+            
+        return None  # Usa OpenAI per casi non chiari
 
     def fetch_serp_results(self, query, country="it", language="it", num_results=10):
         """Effettua la ricerca SERP tramite Serper API"""
@@ -72,42 +156,45 @@ class SERPAnalyzer:
             return None
 
     def classify_page_type_gpt(self, url, title, snippet=""):
-        """Classifica la tipologia della pagina usando OpenAI"""
-        prompt = f"""Classifica la tipologia della seguente pagina web basandoti sull'URL, titolo e snippet:
+        """Classificazione con OpenAI solo per casi complessi"""
+        # Prima prova la classificazione rule-based
+        rule_based_result = self.classify_page_type_rule_based(url, title, snippet)
+        if rule_based_result:
+            return rule_based_result
+            
+        # Cache check
+        cache_key = f"{url}_{title}"
+        if cache_key in self.classification_cache:
+            return self.classification_cache[cache_key]
+        
+        # Prompt ottimizzato per velocità
+        prompt = f"""Classifica SOLO con una di queste categorie:
+        
+URL: {url}
+Titolo: {title}
 
-        URL: {url}
-        Titolo: {title}
-        Snippet: {snippet}
+Categorie: Homepage, Pagina di Categoria, Pagina Prodotto, Articolo di Blog, Pagina di Servizi, Altro
 
-        Le possibili categorie sono:
-        - Homepage
-        - Pagina di Categoria
-        - Pagina Prodotto
-        - Articolo di Blog
-        - Pagina di Servizi
-        - Altro
-
-        Rispondi solo con la categoria esatta, senza testo aggiuntivo.
-        La risposta deve essere in italiano.
-        """
+Rispondi solo con la categoria."""
 
         try:
             response = self.client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4o-mini",  # Modello più veloce ed economico
                 messages=[
-                    {"role": "system", "content": "Classifica la tipologia di pagina web in modo preciso e conciso."},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=15,
+                max_tokens=10,
                 temperature=0
             )
-            return response.choices[0].message.content.strip()
+            result = response.choices[0].message.content.strip()
+            self.classification_cache[cache_key] = result
+            return result
         except Exception as e:
             st.warning(f"Errore OpenAI: {e}")
             return "Altro"
 
     def parse_results(self, data, query):
-        """Analizza i risultati SERP"""
+        """Analizza i risultati SERP con classificazione ottimizzata"""
         domain_page_types = defaultdict(lambda: defaultdict(int))
         domain_occurences = defaultdict(int)
         query_page_types = defaultdict(list)
@@ -117,7 +204,10 @@ class SERPAnalyzer:
         related_to_queries = defaultdict(set)
         paa_to_domains = defaultdict(set)
 
-        # Elaborazione risultati organici
+        # Prima raccoglie tutti i dati delle pagine
+        pages_to_classify = []
+        pages_info = []
+        
         if "organic" in data:
             for result in data["organic"]:
                 domain = urlparse(result["link"]).netloc
@@ -125,8 +215,34 @@ class SERPAnalyzer:
                 title = result.get("title", "")
                 snippet = result.get("snippet", "")
                 
-                page_type = self.classify_page_type_gpt(url, title, snippet)
+                # Prova prima la classificazione rule-based
+                page_type = self.classify_page_type_rule_based(url, title, snippet)
+                
+                if page_type:
+                    # Classificazione immediata con regole
+                    domain_page_types[domain][page_type] += 1
+                    domain_occurences[domain] += 1
+                    query_page_types[query].append(page_type)
+                else:
+                    # Aggiungi alla lista per classificazione OpenAI
+                    pages_to_classify.append((url, title, snippet))
+                    pages_info.append((domain, url, title, snippet))
 
+        # Classificazione batch per pagine complesse
+        if pages_to_classify and self.use_ai:
+            batch_results = self.classify_batch_openai(pages_to_classify)
+            
+            for domain, url, title, snippet in pages_info:
+                cache_key = f"{url}_{title}"
+                page_type = batch_results.get(cache_key, "Altro")
+                
+                domain_page_types[domain][page_type] += 1
+                domain_occurences[domain] += 1
+                query_page_types[query].append(page_type)
+        elif pages_to_classify and not self.use_ai:
+            # Modalità veloce: assegna "Altro" a tutto ciò che non è classificabile con regole
+            for domain, url, title, snippet in pages_info:
+                page_type = "Altro"
                 domain_page_types[domain][page_type] += 1
                 domain_occurences[domain] += 1
                 query_page_types[query].append(page_type)
@@ -262,6 +378,22 @@ def main():
         value=10,
         help="Numero di risultati da analizzare per ogni query"
     )
+    
+    # Opzioni di velocità
+    st.sidebar.subheader("⚡ Opzioni Velocità")
+    use_ai_classification = st.sidebar.checkbox(
+        "Usa AI per classificazione avanzata",
+        value=True,
+        help="Disabilita per analisi ultra-veloce (solo regole)"
+    )
+    
+    batch_size = st.sidebar.slider(
+        "Dimensione batch AI",
+        min_value=1,
+        max_value=10,
+        value=5,
+        help="Pagine da classificare insieme (più alto = più veloce)"
+    ) if use_ai_classification else 1
 
     # Input queries
     st.header("📝 Inserisci le Query")
@@ -286,8 +418,11 @@ def main():
 
     # Pulsante di avvio
     if st.button("🚀 Avvia Analisi", type="primary", use_container_width=True):
-        if not serper_api_key or not openai_api_key:
-            st.error("⚠️ Inserisci entrambe le API keys!")
+        if use_ai_classification and (not serper_api_key or not openai_api_key):
+            st.error("⚠️ Inserisci entrambe le API keys per l'analisi AI!")
+            return
+        elif not use_ai_classification and not serper_api_key:
+            st.error("⚠️ Inserisci almeno la Serper API key!")
             return
         
         if not queries_input.strip():
@@ -301,7 +436,16 @@ def main():
             return
 
         # Inizializzazione analyzer
-        analyzer = SERPAnalyzer(serper_api_key, openai_api_key)
+        if use_ai_classification:
+            analyzer = SERPAnalyzer(serper_api_key, openai_api_key)
+            st.info("🤖 Modalità AI attivata - Classificazione avanzata delle pagine")
+        else:
+            analyzer = SERPAnalyzer(serper_api_key, "dummy")  # Dummy key se non usa AI
+            st.info("⚡ Modalità Veloce attivata - Solo classificazione basata su regole")
+        
+        # Configurazioni per la velocità
+        analyzer.use_ai = use_ai_classification
+        analyzer.batch_size = batch_size
         
         # Progress bar e containers
         progress_bar = st.progress(0)
@@ -352,7 +496,10 @@ def main():
             
             # Update progress
             progress_bar.progress((i + 1) / len(queries))
-            time.sleep(1)  # Rate limiting
+            
+            # Rate limiting intelligente (più veloce per modalità senza AI)
+            sleep_time = 0.5 if not use_ai_classification else 1.0
+            time.sleep(sleep_time)
 
         status_text.text("✅ Analisi completata! Generazione report...")
 
