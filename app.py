@@ -5,7 +5,7 @@ import time
 import json
 from collections import Counter, defaultdict
 from urllib.parse import urlparse
-import openai
+from openai import OpenAI
 from io import BytesIO
 import plotly.express as px
 import plotly.graph_objects as go
@@ -45,7 +45,7 @@ class SERPAnalyzer:
         self.serper_api_key = serper_api_key
         self.openai_api_key = openai_api_key
         self.serper_url = "https://google.serper.dev/search"
-        openai.api_key = openai_api_key
+        self.client = OpenAI(api_key=openai_api_key)
 
     def fetch_serp_results(self, query, country="it", language="it", num_results=10):
         """Effettua la ricerca SERP tramite Serper API"""
@@ -92,7 +92,7 @@ class SERPAnalyzer:
         """
 
         try:
-            response = openai.ChatCompletion.create(
+            response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
                     {"role": "system", "content": "Classifica la tipologia di pagina web in modo preciso e conciso."},
@@ -101,7 +101,7 @@ class SERPAnalyzer:
                 max_tokens=15,
                 temperature=0
             )
-            return response["choices"][0]["message"]["content"].strip()
+            return response.choices[0].message.content.strip()
         except Exception as e:
             st.warning(f"Errore OpenAI: {e}")
             return "Altro"
@@ -279,7 +279,7 @@ def main():
         st.markdown("### 💡 Suggerimenti")
         st.info("""
         • Una query per riga
-        • Massimo 50 query
+        • Massimo 1000 query
         • Evita caratteri speciali
         • Usa query specifiche per il tuo settore
         """)
@@ -296,8 +296,8 @@ def main():
 
         queries = [q.strip() for q in queries_input.strip().split('\n') if q.strip()]
         
-        if len(queries) > 50:
-            st.error("⚠️ Massimo 50 query per volta!")
+        if len(queries) > 1000:
+            st.error("⚠️ Massimo 1000 query per volta!")
             return
 
         # Inizializzazione analyzer
