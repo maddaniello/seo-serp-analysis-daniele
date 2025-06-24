@@ -578,5 +578,13 @@ def main():
         progress_bar.empty()
         status_text.text("🎉 Analisi completata con successo!")
 
+ # Footer
+    st.markdown("---")
+    st.markdown("""
+    <div style='text-align: center; color: #666;'>
+        <p>SEO SERP Analyzer PRO - Ottieni più informazioni dalle tue analisi keyword - Sviluppato da Daniele Pisciottano e il suo amico Claude 🦕</p>
+    </div>
+    """, unsafe_allow_html=True)
+
 if __name__ == "__main__":
     main()
