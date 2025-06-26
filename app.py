@@ -57,7 +57,72 @@ Cluster: [Nome Cluster 2]
                 simple_clusters = self.cluster_keywords_simple(batch_keywords)
                 all_clusters.update(simple_clusters)
         
-        return all_clustersimport streamlit as st
+        return all_clusters
+
+    def cluster_keywords_simple(self, keywords):
+        """Clustering semplice basato su parole comuni (fallback)"""
+        clusters = defaultdict(list)
+        
+        for keyword in keywords:
+            words = keyword.lower().split()
+            main_word = words[0] if words else keyword
+            
+            # Trova cluster esistente con parola simile
+            assigned = False
+            for cluster_name in clusters:
+                if any(word in cluster_name.lower() or cluster_name.lower() in word for word in words):
+                    clusters[cluster_name].append(keyword)
+                    assigned = True
+                    break
+            
+            if not assigned:
+                clusters[f"Cluster {main_word.capitalize()}"].append(keyword)
+        
+        # Consolida cluster piccoli
+        final_clusters = {}
+        small_clusters = []
+        
+        for cluster_name, cluster_keywords in clusters.items():
+            if len(cluster_keywords) >= 5:
+                final_clusters[cluster_name] = cluster_keywords
+            else:
+                small_clusters.extend(cluster_keywords)
+        
+        if small_clusters:
+            final_clusters["Generale"] = small_clusters
+        
+        return final_clusters
+
+    def parse_clustering_response(self, response_text):
+        """Parse della risposta di clustering da OpenAI"""
+        clusters = {}
+        current_cluster = None
+        
+        lines = response_text.split('\n')
+        for line in lines:
+            line = line.strip()
+            if line.startswith('Cluster:'):
+                current_cluster = line.replace('Cluster:', '').strip()
+                clusters[current_cluster] = []
+            elif line.startswith('-') and current_cluster:
+                keyword = line.replace('-', '').strip()
+                if keyword:
+                    clusters[current_cluster].append(keyword)
+        
+        # Filtra cluster con meno di 5 keyword
+        valid_clusters = {}
+        small_keywords = []
+        
+        for cluster_name, keywords in clusters.items():
+            if len(keywords) >= 5:
+                valid_clusters[cluster_name] = keywords
+            else:
+                small_keywords.extend(keywords)
+        
+        if small_keywords:
+            valid_clusters["Generale"] = small_keywords
+        
+        return valid_clustersimport streamlit as st
 import requests
 import pandas as pd
 import time
