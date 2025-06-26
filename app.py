@@ -852,7 +852,8 @@ def main():
         with col2:
             st.metric("Domini Trovati", len(domains_counter))
         with col3:
-            st.metric("PAA Questions", len(set(paa_questions)))
+            paa_count = len(set(paa_questions)) if paa_questions else 0
+            st.metric("PAA Questions", paa_count)
         with col4:
             cluster_count = len(keyword_clusters) if keyword_clusters else 0
             st.metric("Cluster Semantici", cluster_count)
@@ -899,15 +900,15 @@ def main():
 
         st.subheader("📋 Tabelle Dettagliate")
         
-        tabs = ["Top Domini", "Tipologie Pagine", "Competitor Analysis"]
+        tabs = ["Top Domini", "Tipologie Pagine", "Competitor Analysis", "People Also Ask", "Related Queries"]
         if keyword_clusters:
             tabs.append("Keyword Clustering")
         
-        if len(tabs) == 4:
-            tab1, tab2, tab3, tab4 = st.tabs(tabs)
+        if len(tabs) == 6:
+            tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(tabs)
         else:
-            tab1, tab2, tab3 = st.tabs(tabs)
-            tab4 = None
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(tabs)
+            tab6 = None
         
         with tab1:
             st.dataframe(domains_df, use_container_width=True)
@@ -918,7 +919,44 @@ def main():
         with tab3:
             st.dataframe(domain_page_types_df, use_container_width=True)
         
-        if tab4 and not clustering_df.empty:
+        with tab4:
+            if not paa_df.empty:
+                st.dataframe(paa_df, use_container_width=True)
+                
+                # Insights PAA
+                st.subheader("🔍 Insights People Also Ask")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("PAA Uniche Trovate", len(paa_df))
+                with col2:
+                    avg_keywords = paa_df["Numero Keyword"].mean() if not paa_df.empty else 0
+                    st.metric("Media Keyword per PAA", f"{avg_keywords:.1f}")
+                
+                # Top PAA per keyword
+                if len(paa_df) > 0:
+                    st.write("**Top PAA per numero di keyword che le attivano:**")
+                    top_paa = paa_df.head(5)
+                    for _, row in top_paa.iterrows():
+                        st.write(f"• **{row['People Also Ask']}** - Attivata da {row['Numero Keyword']} keyword")
+            else:
+                st.info("🔍 Nessuna People Also Ask trovata. Prova ad abilitare il Debug Mode nella sidebar per vedere i dati raw di Serper.")
+        
+        with tab5:
+            if not related_df.empty:
+                st.dataframe(related_df, use_container_width=True)
+                
+                # Insights Related
+                st.subheader("🔍 Insights Related Queries")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Query Correlate Trovate", len(related_df))
+                with col2:
+                    avg_keywords_rel = related_df["Numero Keyword"].mean() if not related_df.empty else 0
+                    st.metric("Media Keyword per Related", f"{avg_keywords_rel:.1f}")
+            else:
+                st.info("🔍 Nessuna Related Query trovata.")
+        
+        if tab6 and not clustering_df.empty:
             with tab4:
                 st.dataframe(clustering_df, use_container_width=True)
                 
