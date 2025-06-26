@@ -840,6 +840,35 @@ def main():
             paa_questions, related_queries, paa_to_queries, related_to_queries, paa_to_domains, keyword_clusters
         )
 
+        # Crea DataFrame per PAA e Related qui nel main
+        paa_df = pd.DataFrame()
+        if paa_questions:
+            unique_paa = list(set(paa_questions))
+            paa_data = []
+            for paa_text in unique_paa:
+                keywords_list = list(paa_to_queries.get(paa_text, set()))
+                paa_data.append({
+                    "People Also Ask": paa_text,
+                    "Keyword che lo attivano": ", ".join(keywords_list),
+                    "Numero Keyword": len(keywords_list)
+                })
+            paa_df = pd.DataFrame(paa_data)
+            paa_df = paa_df.sort_values("Numero Keyword", ascending=False)
+        
+        related_df = pd.DataFrame()
+        if related_queries:
+            unique_related = list(set(related_queries))
+            related_data = []
+            for related_text in unique_related:
+                keywords_list = list(related_to_queries.get(related_text, set()))
+                related_data.append({
+                    "Related Query": related_text,
+                    "Keyword che lo attivano": ", ".join(keywords_list),
+                    "Numero Keyword": len(keywords_list)
+                })
+            related_df = pd.DataFrame(related_data)
+            related_df = related_df.sort_values("Numero Keyword", ascending=False)
+
         status_text.text("📊 Visualizzazione risultati...")
 
         st.markdown("---")
