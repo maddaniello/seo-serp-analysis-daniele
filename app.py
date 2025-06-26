@@ -835,12 +835,8 @@ def main():
         status_text.text("✅ Analisi completata! Generazione report...")
 
         domains_counter = Counter(all_domains)
-        excel_data, domains_df, page_type_df, domain_page_types_df, clustering_df = analyzer.create_excel_report(
-            domains_counter, domain_occurences, query_page_types, domain_page_types,
-            paa_questions, related_queries, paa_to_queries, related_to_queries, paa_to_domains, keyword_clusters
-        )
-
-        # Crea DataFrame per PAA e Related qui nel main
+        
+        # Crea DataFrame per PAA e Related PRIMA di creare il report Excel
         paa_df = pd.DataFrame()
         if paa_questions:
             unique_paa = list(set(paa_questions))
@@ -854,6 +850,8 @@ def main():
                 })
             paa_df = pd.DataFrame(paa_data)
             paa_df = paa_df.sort_values("Numero Keyword", ascending=False)
+        else:
+            paa_df = pd.DataFrame(columns=["People Also Ask", "Keyword che lo attivano", "Numero Keyword"])
         
         related_df = pd.DataFrame()
         if related_queries:
@@ -868,8 +866,24 @@ def main():
                 })
             related_df = pd.DataFrame(related_data)
             related_df = related_df.sort_values("Numero Keyword", ascending=False)
+        else:
+            related_df = pd.DataFrame(columns=["Related Query", "Keyword che lo attivano", "Numero Keyword"])
+        
+        # Ora crea il report Excel
+        excel_data, domains_df, page_type_df, domain_page_types_df, clustering_df = analyzer.create_excel_report(
+            domains_counter, domain_occurences, query_page_types, domain_page_types,
+            paa_questions, related_queries, paa_to_queries, related_to_queries, paa_to_domains, keyword_clusters
+        )
 
         status_text.text("📊 Visualizzazione risultati...")
+        
+        # Debug informazioni PAA
+        if st.sidebar.checkbox("Debug Mode", help="Mostra dati raw di Serper"):
+            st.sidebar.write(f"**Debug Info:**")
+            st.sidebar.write(f"PAA raccolte: {len(paa_questions)}")
+            st.sidebar.write(f"Related raccolte: {len(related_queries)}")
+            if paa_questions:
+                st.sidebar.write(f"Prima PAA: {paa_questions[0][:50]}...")
 
         st.markdown("---")
         st.header("📊 Risultati Analisi")
