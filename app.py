@@ -666,6 +666,14 @@ def main():
         help="Pagine da classificare insieme (più alto = più veloce)"
     ) if use_ai_classification else 1
 
+    # Debug Mode
+    st.sidebar.subheader("🔍 Debug")
+    debug_mode = st.sidebar.checkbox(
+        "Debug Mode - Mostra dati Serper",
+        value=False,
+        help="Attiva per vedere cosa restituisce l'API Serper e diagnosticare problemi PAA"
+    )
+
     st.header("📝 Inserisci le Query")
     
     col1, col2 = st.columns([3, 1])
@@ -725,6 +733,56 @@ def main():
         if len(queries) > 1000:
             st.error("⚠️ Massimo 1000 query per volta!")
             return
+
+        # TEST RAPIDO SERPER - Controlliamo subito la prima query se debug attivo
+        if debug_mode:
+            st.markdown("### 🔍 Test Rapido Serper API")
+            test_query = queries[0]
+            st.write(f"Testando query: **{test_query}**")
+            
+            headers = {
+                "X-API-KEY": serper_api_key,
+                "Content-Type": "application/json"
+            }
+            payload = json.dumps({
+                "q": test_query,
+                "num": 5,  # Solo 5 risultati per test
+                "gl": country,
+                "hl": language
+            })
+            
+            try:
+                response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
+                if response.status_code == 200:
+                    test_data = response.json()
+                    st.success("✅ Connessione Serper OK!")
+                    
+                    # Mostra struttura completa
+                    st.write("**Chiavi disponibili nei dati:**")
+                    st.code(list(test_data.keys()))
+                    
+                    # Controlla PAA
+                    if "peopleAlsoAsk" in test_data:
+                        st.write(f"**✅ peopleAlsoAsk trovata!** ({len(test_data['peopleAlsoAsk'])} elementi)")
+                        for i, paa in enumerate(test_data['peopleAlsoAsk'][:3]):
+                            st.write(f"PAA {i+1}: {paa}")
+                    else:
+                        st.write("**❌ peopleAlsoAsk NON trovata**")
+                        st.write("Tutte le chiavi disponibili:", list(test_data.keys()))
+                    
+                    # Controlla Related
+                    if "relatedSearches" in test_data:
+                        st.write(f"**✅ relatedSearches trovata!** ({len(test_data['relatedSearches'])} elementi)")
+                    else:
+                        st.write("**❌ relatedSearches NON trovata**")
+                    
+                    st.markdown("---")
+                else:
+                    st.error(f"❌ Errore Serper: {response.status_code}")
+                    return
+            except Exception as e:
+                st.error(f"❌ Errore connessione: {e}")
+                return
 
         custom_clusters = []
         if enable_keyword_clustering and 'custom_clusters_input' in locals() and custom_clusters_input.strip():
@@ -876,10 +934,6 @@ def main():
         )
 
         status_text.text("📊 Visualizzazione risultati...")
-        
-        # Mostra debug finale
-        if debug_mode:
-            st.info(f"🔍 **Debug Finale:** Totale PAA raccolte: {len(paa_questions)} | Related: {len(related_queries)}")
 
         st.markdown("---")
         st.header("📊 Risultati Analisi")
