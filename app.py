@@ -1,128 +1,4 @@
-def cluster_keywords_semantic(self, keywords):
-        """Clusterizza le keyword per gruppi semantici usando OpenAI"""
-        if not self.client or not self.use_ai:
-            # Fallback: clustering semplice basato su parole comuni
-            return self.cluster_keywords_simple(keywords)
-        
-        # Dividi in batch per evitare prompt troppo lunghi
-        batch_size = 50
-        all_clusters = {}
-        
-        for i in range(0, len(keywords), batch_size):
-            batch_keywords = keywords[i:i+batch_size]
-            
-            prompt = f"""Ruolo: Esperto di analisi semantica
-Capacità: Possiedi competenze approfondite in linguistica computazionale, analisi semantica e clustering di parole chiave.
-
-Compito: Clusterizza il seguente elenco di keyword raggruppando quelle appartenenti allo stesso gruppo semantico. Ogni cluster deve contenere ALMENO 5 keyword per essere valido.
-
-Elenco keyword da analizzare:
-{chr(10).join([f"- {kw}" for kw in batch_keywords])}
-
-Istruzioni:
-1. Raggruppa le keyword per similarità semantica, significato e contesto d'uso
-2. Ogni cluster deve avere almeno 5 keyword
-3. Se una keyword non ha abbastanza correlate, inseriscila nel cluster "Generale"
-4. Dai un nome descrittivo a ogni cluster
-
-Formato di risposta:
-Cluster: [Nome Cluster]
-- keyword1
-- keyword2
-- keyword3
-- keyword4
-- keyword5
-
-Cluster: [Nome Cluster 2]
-- keyword6
-- keyword7
-[etc...]"""
-
-            try:
-                response = self.client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=2000,
-                    temperature=0.3
-                )
-                
-                # Parse della risposta
-                response_text = response.choices[0].message.content.strip()
-                clusters = self.parse_clustering_response(response_text)
-                all_clusters.update(clusters)
-                
-            except Exception as e:
-                st.warning(f"Errore clustering OpenAI batch {i//batch_size + 1}: {e}")
-                # Fallback per questo batch
-                simple_clusters = self.cluster_keywords_simple(batch_keywords)
-                all_clusters.update(simple_clusters)
-        
-        return all_clusters
-
-    def cluster_keywords_simple(self, keywords):
-        """Clustering semplice basato su parole comuni (fallback)"""
-        clusters = defaultdict(list)
-        
-        for keyword in keywords:
-            words = keyword.lower().split()
-            main_word = words[0] if words else keyword
-            
-            # Trova cluster esistente con parola simile
-            assigned = False
-            for cluster_name in clusters:
-                if any(word in cluster_name.lower() or cluster_name.lower() in word for word in words):
-                    clusters[cluster_name].append(keyword)
-                    assigned = True
-                    break
-            
-            if not assigned:
-                clusters[f"Cluster {main_word.capitalize()}"].append(keyword)
-        
-        # Consolida cluster piccoli
-        final_clusters = {}
-        small_clusters = []
-        
-        for cluster_name, cluster_keywords in clusters.items():
-            if len(cluster_keywords) >= 5:
-                final_clusters[cluster_name] = cluster_keywords
-            else:
-                small_clusters.extend(cluster_keywords)
-        
-        if small_clusters:
-            final_clusters["Generale"] = small_clusters
-        
-        return final_clusters
-
-    def parse_clustering_response(self, response_text):
-        """Parse della risposta di clustering da OpenAI"""
-        clusters = {}
-        current_cluster = None
-        
-        lines = response_text.split('\n')
-        for line in lines:
-            line = line.strip()
-            if line.startswith('Cluster:'):
-                current_cluster = line.replace('Cluster:', '').strip()
-                clusters[current_cluster] = []
-            elif line.startswith('-') and current_cluster:
-                keyword = line.replace('-', '').strip()
-                if keyword:
-                    clusters[current_cluster].append(keyword)
-        
-        # Filtra cluster con meno di 5 keyword
-        valid_clusters = {}
-        small_keywords = []
-        
-        for cluster_name, keywords in clusters.items():
-            if len(keywords) >= 5:
-                valid_clusters[cluster_name] = keywords
-            else:
-                small_keywords.extend(keywords)
-        
-        if small_keywords:
-            valid_clusters["Generale"] = small_keywords
-        
-        return valid_clustersimport streamlit as st
+import streamlit as st
 import requests
 import pandas as pd
 import time
@@ -319,79 +195,6 @@ Rispondi solo con la categoria."""
             st.warning(f"Errore batch OpenAI: {e}")
             return {}
 
-    def parse_results(self, data, query):
-        """Analizza i risultati SERP con classificazione ottimizzata"""
-        domain_page_types = defaultdict(lambda: defaultdict(int))
-        domain_occurences = defaultdict(int)
-        query_page_types = defaultdict(list)
-        paa_questions = []
-        related_queries = []
-        paa_to_queries = defaultdict(set)
-        related_to_queries = defaultdict(set)
-        paa_to_domains = defaultdict(set)
-
-        # Prima raccoglie tutti i dati delle pagine
-        pages_to_classify = []
-        pages_info = []
-        
-        if "organic" in data:
-            for result in data["organic"]:
-                domain = urlparse(result["link"]).netloc
-                url = result["link"]
-                title = result.get("title", "")
-                snippet = result.get("snippet", "")
-                
-                # Prova prima la classificazione rule-based
-                page_type = self.classify_page_type_rule_based(url, title, snippet)
-                
-                if page_type:
-                    # Classificazione immediata con regole
-                    domain_page_types[domain][page_type] += 1
-                    domain_occurences[domain] += 1
-                    query_page_types[query].append(page_type)
-                else:
-                    # Aggiungi alla lista per classificazione OpenAI
-                    pages_to_classify.append((url, title, snippet))
-                    pages_info.append((domain, url, title, snippet))
-
-        # Classificazione batch per pagine complesse
-        if pages_to_classify and self.use_ai:
-            batch_results = self.classify_batch_openai(pages_to_classify)
-            
-            for domain, url, title, snippet in pages_info:
-                cache_key = f"{url}_{title}"
-                page_type = batch_results.get(cache_key, "Altro")
-                
-                domain_page_types[domain][page_type] += 1
-                domain_occurences[domain] += 1
-                query_page_types[query].append(page_type)
-        elif pages_to_classify and not self.use_ai:
-            # Modalità veloce: assegna "Altro" a tutto ciò che non è classificabile con regole
-            for domain, url, title, snippet in pages_info:
-                page_type = "Altro"
-                domain_page_types[domain][page_type] += 1
-                domain_occurences[domain] += 1
-                query_page_types[query].append(page_type)
-
-        # People Also Ask
-        if "peopleAlsoAsk" in data:
-            for paa in data["peopleAlsoAsk"]:
-                paa_text = paa["question"]
-                paa_questions.append(paa_text)
-                paa_to_queries[paa_text].add(query)
-                paa_to_domains[paa_text].update([domain for domain in domain_page_types.keys()])
-
-        # Related Searches
-        if "relatedSearches" in data:
-            for related in data["relatedSearches"]:
-                related_text = related["query"]
-                related_queries.append(related_text)
-                related_to_queries[related_text].add(query)
-
-        return (domain_page_types, domain_occurences, query_page_types, 
-                paa_questions, related_queries, paa_to_queries, 
-                related_to_queries, paa_to_domains)
-
     def cluster_keywords_with_custom(self, keywords, custom_clusters):
         """Clusterizza le keyword usando cluster personalizzati come priorità"""
         if not self.client or not self.use_ai:
@@ -542,12 +345,12 @@ Cluster: [Altro Cluster]
                 valid_clusters["Generale"] = small_keywords
         
         return valid_clusters
+
+    def cluster_keywords_semantic(self, keywords):
         """Clusterizza le keyword per gruppi semantici usando OpenAI"""
         if not self.client or not self.use_ai:
-            # Fallback: clustering semplice basato su parole comuni
             return self.cluster_keywords_simple(keywords)
         
-        # Dividi in batch per evitare prompt troppo lunghi
         batch_size = 50
         all_clusters = {}
         
@@ -589,14 +392,12 @@ Cluster: [Nome Cluster 2]
                     temperature=0.3
                 )
                 
-                # Parse della risposta
                 response_text = response.choices[0].message.content.strip()
                 clusters = self.parse_clustering_response(response_text)
                 all_clusters.update(clusters)
                 
             except Exception as e:
                 st.warning(f"Errore clustering OpenAI batch {i//batch_size + 1}: {e}")
-                # Fallback per questo batch
                 simple_clusters = self.cluster_keywords_simple(batch_keywords)
                 all_clusters.update(simple_clusters)
         
@@ -610,7 +411,6 @@ Cluster: [Nome Cluster 2]
             words = keyword.lower().split()
             main_word = words[0] if words else keyword
             
-            # Trova cluster esistente con parola simile
             assigned = False
             for cluster_name in clusters:
                 if any(word in cluster_name.lower() or cluster_name.lower() in word for word in words):
@@ -621,7 +421,6 @@ Cluster: [Nome Cluster 2]
             if not assigned:
                 clusters[f"Cluster {main_word.capitalize()}"].append(keyword)
         
-        # Consolida cluster piccoli
         final_clusters = {}
         small_clusters = []
         
@@ -652,7 +451,6 @@ Cluster: [Nome Cluster 2]
                 if keyword:
                     clusters[current_cluster].append(keyword)
         
-        # Filtra cluster con meno di 5 keyword
         valid_clusters = {}
         small_keywords = []
         
@@ -667,12 +465,76 @@ Cluster: [Nome Cluster 2]
         
         return valid_clusters
 
+    def parse_results(self, data, query):
+        """Analizza i risultati SERP con classificazione ottimizzata"""
+        domain_page_types = defaultdict(lambda: defaultdict(int))
+        domain_occurences = defaultdict(int)
+        query_page_types = defaultdict(list)
+        paa_questions = []
+        related_queries = []
+        paa_to_queries = defaultdict(set)
+        related_to_queries = defaultdict(set)
+        paa_to_domains = defaultdict(set)
+
+        pages_to_classify = []
+        pages_info = []
+        
+        if "organic" in data:
+            for result in data["organic"]:
+                domain = urlparse(result["link"]).netloc
+                url = result["link"]
+                title = result.get("title", "")
+                snippet = result.get("snippet", "")
+                
+                page_type = self.classify_page_type_rule_based(url, title, snippet)
+                
+                if page_type:
+                    domain_page_types[domain][page_type] += 1
+                    domain_occurences[domain] += 1
+                    query_page_types[query].append(page_type)
+                else:
+                    pages_to_classify.append((url, title, snippet))
+                    pages_info.append((domain, url, title, snippet))
+
+        if pages_to_classify and self.use_ai:
+            batch_results = self.classify_batch_openai(pages_to_classify)
+            
+            for domain, url, title, snippet in pages_info:
+                cache_key = f"{url}_{title}"
+                page_type = batch_results.get(cache_key, "Altro")
+                
+                domain_page_types[domain][page_type] += 1
+                domain_occurences[domain] += 1
+                query_page_types[query].append(page_type)
+        elif pages_to_classify and not self.use_ai:
+            for domain, url, title, snippet in pages_info:
+                page_type = "Altro"
+                domain_page_types[domain][page_type] += 1
+                domain_occurences[domain] += 1
+                query_page_types[query].append(page_type)
+
+        if "peopleAlsoAsk" in data:
+            for paa in data["peopleAlsoAsk"]:
+                paa_text = paa["question"]
+                paa_questions.append(paa_text)
+                paa_to_queries[paa_text].add(query)
+                paa_to_domains[paa_text].update([domain for domain in domain_page_types.keys()])
+
+        if "relatedSearches" in data:
+            for related in data["relatedSearches"]:
+                related_text = related["query"]
+                related_queries.append(related_text)
+                related_to_queries[related_text].add(query)
+
+        return (domain_page_types, domain_occurences, query_page_types, 
+                paa_questions, related_queries, paa_to_queries, 
+                related_to_queries, paa_to_domains)
+
     def create_excel_report(self, domains_counter, domain_occurences, query_page_types, 
                            domain_page_types, paa_questions, related_queries, 
                            paa_to_queries, related_to_queries, paa_to_domains, keyword_clusters=None):
         """Crea il report Excel"""
         
-        # DataFrame per domini e tipologie
         domain_page_types_list = []
         page_type_counter = Counter()
 
@@ -691,12 +553,10 @@ Cluster: [Nome Cluster 2]
 
         domain_page_types_df = pd.DataFrame(domain_page_types_list)
 
-        # Top Domains
         domains_df = pd.DataFrame(domains_counter.items(), columns=["Dominio", "Occorrenze"])
         total_queries = sum(domains_counter.values())
         domains_df["% Presenza"] = (domains_df["Occorrenze"] / total_queries * 100).round(2)
 
-        # Query page types
         query_page_type_data = []
         for query, page_types in query_page_types.items():
             for page_type, count in Counter(page_types).items():
@@ -707,23 +567,19 @@ Cluster: [Nome Cluster 2]
                 })
         query_page_type_df = pd.DataFrame(query_page_type_data)
 
-        # PAA DataFrame
         paa_df = pd.DataFrame(paa_questions, columns=["People Also Ask"])
         paa_df["Keyword che lo attivano"] = paa_df["People Also Ask"].map(
             lambda x: ", ".join(paa_to_queries[x])
         )
 
-        # Related Queries DataFrame
         related_df = pd.DataFrame(related_queries, columns=["Related Query"])
         related_df["Keyword che lo attivano"] = related_df["Related Query"].map(
             lambda x: ", ".join(related_to_queries[x])
         )
 
-        # Page Types DataFrame
         page_type_df = pd.DataFrame(page_type_counter.items(), 
                                   columns=["Tipologia Pagina", "Occorrenze"])
 
-        # Keyword Clustering DataFrame
         clustering_df = pd.DataFrame()
         if keyword_clusters:
             clustering_data = []
@@ -735,7 +591,6 @@ Cluster: [Nome Cluster 2]
                     })
             clustering_df = pd.DataFrame(clustering_data)
 
-        # Creazione file Excel in memoria
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             domains_df.to_excel(writer, sheet_name="Top Domains", index=False)
@@ -750,14 +605,11 @@ Cluster: [Nome Cluster 2]
         return output.getvalue(), domains_df, page_type_df, domain_page_types_df, clustering_df
 
 def main():
-    # Header
     st.markdown('<h1 class="main-header">🔍 SERP Analyzer Pro</h1>', unsafe_allow_html=True)
     st.markdown("---")
 
-    # Sidebar per configurazione
     st.sidebar.header("⚙️ Configurazione")
     
-    # API Keys
     serper_api_key = st.sidebar.text_input(
         "Serper API Key", 
         type="password",
@@ -770,7 +622,6 @@ def main():
         help="Inserisci la tua API key di OpenAI"
     )
 
-    # Parametri di ricerca
     st.sidebar.subheader("🌍 Parametri di Ricerca")
     country = st.sidebar.selectbox(
         "Paese",
@@ -794,7 +645,6 @@ def main():
         help="Numero di risultati da analizzare per ogni query"
     )
     
-    # Opzioni di velocità
     st.sidebar.subheader("⚡ Opzioni Velocità")
     use_ai_classification = st.sidebar.checkbox(
         "Usa AI per classificazione avanzata",
@@ -816,7 +666,6 @@ def main():
         help="Pagine da classificare insieme (più alto = più veloce)"
     ) if use_ai_classification else 1
 
-    # Input queries
     st.header("📝 Inserisci le Query")
     
     col1, col2 = st.columns([3, 1])
@@ -837,7 +686,6 @@ def main():
         • Usa query specifiche per il tuo settore
         """)
 
-    # Sezione Cluster Personalizzati (opzionale)
     if enable_keyword_clustering:
         st.header("🏗️ Cluster Personalizzati (Opzionale)")
         
@@ -859,14 +707,7 @@ def main():
             • Sezioni importanti
             • Lascia vuoto per clustering automatico
             """)
-            
-            use_custom_clusters = st.checkbox(
-                "Usa cluster personalizzati",
-                value=bool(custom_clusters_input.strip()) if 'custom_clusters_input' in locals() else False,
-                help="Le keyword verranno associate principalmente ai tuoi cluster"
-            )
 
-    # Pulsante di avvio
     if st.button("🚀 Avvia Analisi", type="primary", use_container_width=True):
         if use_ai_classification and (not serper_api_key or not openai_api_key):
             st.error("⚠️ Inserisci entrambe le API keys per l'analisi AI!")
@@ -885,12 +726,10 @@ def main():
             st.error("⚠️ Massimo 1000 query per volta!")
             return
 
-        # Parse custom clusters se forniti
         custom_clusters = []
         if enable_keyword_clustering and 'custom_clusters_input' in locals() and custom_clusters_input.strip():
             custom_clusters = [c.strip() for c in custom_clusters_input.strip().split('\n') if c.strip()]
 
-        # Inizializzazione analyzer
         if use_ai_classification:
             analyzer = SERPAnalyzer(serper_api_key, openai_api_key)
             st.info("🤖 Modalità AI attivata - Classificazione avanzata delle pagine")
@@ -898,11 +737,9 @@ def main():
             analyzer = SERPAnalyzer(serper_api_key, "dummy")
             st.info("⚡ Modalità Veloce attivata - Solo classificazione basata su regole")
         
-        # Configurazioni per la velocità
         analyzer.use_ai = use_ai_classification
         analyzer.batch_size = batch_size
         
-        # Clustering keyword se abilitato
         keyword_clusters = {}
         if enable_keyword_clustering and (use_ai_classification or len(queries) > 0):
             status_text = st.empty()
@@ -913,7 +750,6 @@ def main():
                     keyword_clusters = analyzer.cluster_keywords_with_custom(queries, custom_clusters)
                     st.success(f"✅ Cluster creati: {len(keyword_clusters)} (inclusi {len([k for k in keyword_clusters.keys() if k in custom_clusters])} personalizzati)")
                     
-                    # Preview clustering personalizzato
                     with st.expander("👀 Preview Clustering Personalizzato"):
                         col1, col2 = st.columns(2)
                         
@@ -942,7 +778,6 @@ def main():
                     keyword_clusters = analyzer.cluster_keywords_semantic(queries)
                     st.success(f"✅ Identificati {len(keyword_clusters)} cluster semantici!")
                     
-                    # Mostra preview clustering
                     with st.expander("👀 Preview Clustering Automatico"):
                         for cluster_name, keywords in list(keyword_clusters.items())[:3]:
                             st.write(f"**{cluster_name}** ({len(keywords)} keyword)")
@@ -952,14 +787,9 @@ def main():
                     st.warning(f"Errore durante il clustering: {e}")
                     keyword_clusters = {}
         
-        # Progress bar e containers
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Contenitori per risultati live
-        live_results = st.container()
-        
-        # Variabili per accumulo dati
         all_domains = []
         query_page_types = defaultdict(list)
         domain_page_types = defaultdict(lambda: defaultdict(int))
@@ -970,7 +800,6 @@ def main():
         related_to_queries = defaultdict(set)
         paa_to_domains = defaultdict(set)
 
-        # Elaborazione queries
         for i, query in enumerate(queries):
             status_text.text(f"🔍 Analizzando: {query} ({i+1}/{len(queries)})")
             
@@ -981,7 +810,6 @@ def main():
                  paa_questions_query, related_queries_query, paa_to_queries_query,
                  related_to_queries_query, paa_to_domains_query) = analyzer.parse_results(results, query)
                 
-                # Accumulo dati
                 for domain, page_types in domain_page_types_query.items():
                     for page_type, count in page_types.items():
                         domain_page_types[domain][page_type] += count
@@ -999,16 +827,13 @@ def main():
                 paa_to_domains.update(paa_to_domains_query)
                 all_domains.extend(domain_page_types_query.keys())
             
-            # Update progress
             progress_bar.progress((i + 1) / len(queries))
             
-            # Rate limiting intelligente (più veloce per modalità senza AI)
             sleep_time = 0.5 if not use_ai_classification else 1.0
             time.sleep(sleep_time)
 
         status_text.text("✅ Analisi completata! Generazione report...")
 
-        # Creazione report
         domains_counter = Counter(all_domains)
         excel_data, domains_df, page_type_df, domain_page_types_df, clustering_df = analyzer.create_excel_report(
             domains_counter, domain_occurences, query_page_types, domain_page_types,
@@ -1017,11 +842,9 @@ def main():
 
         status_text.text("📊 Visualizzazione risultati...")
 
-        # Risultati
         st.markdown("---")
         st.header("📊 Risultati Analisi")
 
-        # Metriche principali
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
@@ -1034,7 +857,6 @@ def main():
             cluster_count = len(keyword_clusters) if keyword_clusters else 0
             st.metric("Cluster Semantici", cluster_count)
 
-        # Grafici
         col1, col2 = st.columns(2)
         
         with col1:
@@ -1060,11 +882,9 @@ def main():
                 )
                 st.plotly_chart(fig_pie, use_container_width=True)
 
-        # Clustering Visualization
         if keyword_clusters:
             st.subheader("🧠 Analisi Cluster Semantici")
             
-            # Grafico cluster size
             cluster_sizes = {name: len(keywords) for name, keywords in keyword_clusters.items()}
             cluster_df = pd.DataFrame(list(cluster_sizes.items()), columns=["Cluster", "Numero Keyword"])
             
@@ -1077,7 +897,6 @@ def main():
             fig_clusters.update_layout(xaxis_tickangle=-45)
             st.plotly_chart(fig_clusters, use_container_width=True)
 
-        # Tabelle risultati
         st.subheader("📋 Tabelle Dettagliate")
         
         tabs = ["Top Domini", "Tipologie Pagine", "Competitor Analysis"]
@@ -1103,10 +922,8 @@ def main():
             with tab4:
                 st.dataframe(clustering_df, use_container_width=True)
                 
-                # Dettagli clustering
                 st.subheader("🔍 Dettagli Cluster")
                 
-                # Separazione cluster personalizzati vs automatici
                 if custom_clusters:
                     col1, col2 = st.columns(2)
                     
@@ -1136,7 +953,6 @@ def main():
                             st.write("Nessun cluster automatico creato")
                             selected_auto = None
                     
-                    # Mostra dettagli del cluster selezionato
                     selected_cluster = selected_personal or selected_auto
                 else:
                     selected_cluster = st.selectbox(
@@ -1150,13 +966,11 @@ def main():
                     
                     st.write(f"**{selected_cluster}** ({cluster_type}) - {len(cluster_keywords)} keyword:")
                     
-                    # Mostra keyword in formato grid
                     cols = st.columns(3)
                     for i, keyword in enumerate(cluster_keywords):
                         with cols[i % 3]:
                             st.write(f"• {keyword}")
 
-        # Download Excel
         st.subheader("💾 Download Report")
         st.download_button(
             label="📥 Scarica Report Excel Completo",
@@ -1167,6 +981,13 @@ def main():
 
         progress_bar.empty()
         status_text.text("🎉 Analisi completata con successo!")
+
+    st.markdown("---")
+    st.markdown("""
+    <div style='text-align: center; color: #666;'>
+        <p>SEO SERP Analyzer PRO - Ottieni più informazioni dalle tue analisi keyword - Sviluppato da Daniele Pisciottano e il suo amico Claude 🦕</p>
+    </div>
+    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
