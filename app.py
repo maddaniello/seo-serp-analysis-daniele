@@ -666,14 +666,6 @@ def main():
         help="Pagine da classificare insieme (più alto = più veloce)"
     ) if use_ai_classification else 1
 
-    # Debug Mode
-    st.sidebar.subheader("🔍 Debug")
-    debug_mode = st.sidebar.checkbox(
-        "Debug Mode - Mostra dati Serper",
-        value=False,
-        help="Attiva per vedere cosa restituisce l'API Serper e diagnosticare problemi PAA"
-    )
-
     st.header("📝 Inserisci le Query")
     
     col1, col2 = st.columns([3, 1])
@@ -733,56 +725,6 @@ def main():
         if len(queries) > 1000:
             st.error("⚠️ Massimo 1000 query per volta!")
             return
-
-        # TEST RAPIDO SERPER - Controlliamo subito la prima query se debug attivo
-        if debug_mode:
-            st.markdown("### 🔍 Test Rapido Serper API")
-            test_query = queries[0]
-            st.write(f"Testando query: **{test_query}**")
-            
-            headers = {
-                "X-API-KEY": serper_api_key,
-                "Content-Type": "application/json"
-            }
-            payload = json.dumps({
-                "q": test_query,
-                "num": 5,  # Solo 5 risultati per test
-                "gl": country,
-                "hl": language
-            })
-            
-            try:
-                response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
-                if response.status_code == 200:
-                    test_data = response.json()
-                    st.success("✅ Connessione Serper OK!")
-                    
-                    # Mostra struttura completa
-                    st.write("**Chiavi disponibili nei dati:**")
-                    st.code(list(test_data.keys()))
-                    
-                    # Controlla PAA
-                    if "peopleAlsoAsk" in test_data:
-                        st.write(f"**✅ peopleAlsoAsk trovata!** ({len(test_data['peopleAlsoAsk'])} elementi)")
-                        for i, paa in enumerate(test_data['peopleAlsoAsk'][:3]):
-                            st.write(f"PAA {i+1}: {paa}")
-                    else:
-                        st.write("**❌ peopleAlsoAsk NON trovata**")
-                        st.write("Tutte le chiavi disponibili:", list(test_data.keys()))
-                    
-                    # Controlla Related
-                    if "relatedSearches" in test_data:
-                        st.write(f"**✅ relatedSearches trovata!** ({len(test_data['relatedSearches'])} elementi)")
-                    else:
-                        st.write("**❌ relatedSearches NON trovata**")
-                    
-                    st.markdown("---")
-                else:
-                    st.error(f"❌ Errore Serper: {response.status_code}")
-                    return
-            except Exception as e:
-                st.error(f"❌ Errore connessione: {e}")
-                return
 
         custom_clusters = []
         if enable_keyword_clustering and 'custom_clusters_input' in locals() and custom_clusters_input.strip():
@@ -893,41 +835,6 @@ def main():
         status_text.text("✅ Analisi completata! Generazione report...")
 
         domains_counter = Counter(all_domains)
-        
-        # Crea DataFrame per PAA e Related PRIMA di creare il report Excel
-        paa_df = pd.DataFrame()
-        if paa_questions:
-            unique_paa = list(set(paa_questions))
-            paa_data = []
-            for paa_text in unique_paa:
-                keywords_list = list(paa_to_queries.get(paa_text, set()))
-                paa_data.append({
-                    "People Also Ask": paa_text,
-                    "Keyword che lo attivano": ", ".join(keywords_list),
-                    "Numero Keyword": len(keywords_list)
-                })
-            paa_df = pd.DataFrame(paa_data)
-            paa_df = paa_df.sort_values("Numero Keyword", ascending=False)
-        else:
-            paa_df = pd.DataFrame(columns=["People Also Ask", "Keyword che lo attivano", "Numero Keyword"])
-        
-        related_df = pd.DataFrame()
-        if related_queries:
-            unique_related = list(set(related_queries))
-            related_data = []
-            for related_text in unique_related:
-                keywords_list = list(related_to_queries.get(related_text, set()))
-                related_data.append({
-                    "Related Query": related_text,
-                    "Keyword che lo attivano": ", ".join(keywords_list),
-                    "Numero Keyword": len(keywords_list)
-                })
-            related_df = pd.DataFrame(related_data)
-            related_df = related_df.sort_values("Numero Keyword", ascending=False)
-        else:
-            related_df = pd.DataFrame(columns=["Related Query", "Keyword che lo attivano", "Numero Keyword"])
-        
-        # Ora crea il report Excel
         excel_data, domains_df, page_type_df, domain_page_types_df, clustering_df = analyzer.create_excel_report(
             domains_counter, domain_occurences, query_page_types, domain_page_types,
             paa_questions, related_queries, paa_to_queries, related_to_queries, paa_to_domains, keyword_clusters
@@ -945,8 +852,7 @@ def main():
         with col2:
             st.metric("Domini Trovati", len(domains_counter))
         with col3:
-            paa_count = len(set(paa_questions)) if paa_questions else 0
-            st.metric("PAA Questions", paa_count)
+            st.metric("PAA Questions", len(set(paa_questions)))
         with col4:
             cluster_count = len(keyword_clusters) if keyword_clusters else 0
             st.metric("Cluster Semantici", cluster_count)
@@ -993,15 +899,15 @@ def main():
 
         st.subheader("📋 Tabelle Dettagliate")
         
-        tabs = ["Top Domini", "Tipologie Pagine", "Competitor Analysis", "People Also Ask", "Related Queries"]
+        tabs = ["Top Domini", "Tipologie Pagine", "Competitor Analysis"]
         if keyword_clusters:
             tabs.append("Keyword Clustering")
         
-        if len(tabs) == 6:
-            tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(tabs)
+        if len(tabs) == 4:
+            tab1, tab2, tab3, tab4 = st.tabs(tabs)
         else:
-            tab1, tab2, tab3, tab4, tab5 = st.tabs(tabs)
-            tab6 = None
+            tab1, tab2, tab3 = st.tabs(tabs)
+            tab4 = None
         
         with tab1:
             st.dataframe(domains_df, use_container_width=True)
@@ -1012,44 +918,7 @@ def main():
         with tab3:
             st.dataframe(domain_page_types_df, use_container_width=True)
         
-        with tab4:
-            if not paa_df.empty:
-                st.dataframe(paa_df, use_container_width=True)
-                
-                # Insights PAA
-                st.subheader("🔍 Insights People Also Ask")
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("PAA Uniche Trovate", len(paa_df))
-                with col2:
-                    avg_keywords = paa_df["Numero Keyword"].mean() if not paa_df.empty else 0
-                    st.metric("Media Keyword per PAA", f"{avg_keywords:.1f}")
-                
-                # Top PAA per keyword
-                if len(paa_df) > 0:
-                    st.write("**Top PAA per numero di keyword che le attivano:**")
-                    top_paa = paa_df.head(5)
-                    for _, row in top_paa.iterrows():
-                        st.write(f"• **{row['People Also Ask']}** - Attivata da {row['Numero Keyword']} keyword")
-            else:
-                st.info("🔍 Nessuna People Also Ask trovata. Prova ad abilitare il Debug Mode nella sidebar per vedere i dati raw di Serper.")
-        
-        with tab5:
-            if not related_df.empty:
-                st.dataframe(related_df, use_container_width=True)
-                
-                # Insights Related
-                st.subheader("🔍 Insights Related Queries")
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("Query Correlate Trovate", len(related_df))
-                with col2:
-                    avg_keywords_rel = related_df["Numero Keyword"].mean() if not related_df.empty else 0
-                    st.metric("Media Keyword per Related", f"{avg_keywords_rel:.1f}")
-            else:
-                st.info("🔍 Nessuna Related Query trovata.")
-        
-        if tab6 and not clustering_df.empty:
+        if tab4 and not clustering_df.empty:
             with tab4:
                 st.dataframe(clustering_df, use_container_width=True)
                 
