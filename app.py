@@ -877,13 +877,9 @@ def main():
 
         status_text.text("📊 Visualizzazione risultati...")
         
-        # Debug informazioni PAA
-        if st.sidebar.checkbox("Debug Mode", help="Mostra dati raw di Serper"):
-            st.sidebar.write(f"**Debug Info:**")
-            st.sidebar.write(f"PAA raccolte: {len(paa_questions)}")
-            st.sidebar.write(f"Related raccolte: {len(related_queries)}")
-            if paa_questions:
-                st.sidebar.write(f"Prima PAA: {paa_questions[0][:50]}...")
+        # Mostra debug finale
+        if debug_mode:
+            st.info(f"🔍 **Debug Finale:** Totale PAA raccolte: {len(paa_questions)} | Related: {len(related_queries)}")
 
         st.markdown("---")
         st.header("📊 Risultati Analisi")
