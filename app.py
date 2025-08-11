@@ -15,6 +15,10 @@ import concurrent.futures
 import threading
 from functools import lru_cache
 import re
+import pickle
+import os
+from datetime import datetime
+import gc
 
 # Configurazione della pagina
 st.set_page_config(
@@ -55,9 +59,13 @@ class SERPAnalyzer:
         self.classification_cache = {}
         self.use_ai = True
         self.batch_size = 5
+        # Aggiungi timeout e retry
+        self.request_timeout = 30
+        self.max_retries = 3
+        self.retry_delay = 2
 
-    def fetch_serp_results(self, query, country="it", language="it", num_results=10):
-        """Effettua la ricerca SERP tramite Serper API"""
+    def fetch_serp_results_with_retry(self, query, country="it", language="it", num_results=10):
+        """Effettua la ricerca SERP con retry in caso di errore"""
         headers = {
             "X-API-KEY": self.serper_api_key,
             "Content-Type": "application/json"
@@ -69,16 +77,35 @@ class SERPAnalyzer:
             "hl": language
         })
         
-        try:
-            response = requests.post(self.serper_url, headers=headers, data=payload)
-            if response.status_code == 200:
-                return response.json()
-            else:
-                st.error(f"Errore API per query '{query}': {response.status_code}")
-                return None
-        except Exception as e:
-            st.error(f"Errore di connessione: {e}")
-            return None
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.post(
+                    self.serper_url, 
+                    headers=headers, 
+                    data=payload,
+                    timeout=self.request_timeout
+                )
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code == 429:  # Rate limit
+                    wait_time = self.retry_delay * (attempt + 1)
+                    st.warning(f"Rate limit raggiunto per '{query}'. Attendo {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    st.warning(f"Errore API per query '{query}': {response.status_code}")
+            except requests.exceptions.Timeout:
+                st.warning(f"Timeout per query '{query}', tentativo {attempt + 1}/{self.max_retries}")
+            except Exception as e:
+                st.warning(f"Errore per query '{query}': {e}")
+            
+            if attempt < self.max_retries - 1:
+                time.sleep(self.retry_delay)
+        
+        return None
+
+    def fetch_serp_results(self, query, country="it", language="it", num_results=10):
+        """Wrapper retrocompatibile"""
+        return self.fetch_serp_results_with_retry(query, country, language, num_results)
 
     @lru_cache(maxsize=1000)
     def classify_page_type_rule_based(self, url, title, snippet=""):
@@ -604,9 +631,70 @@ Cluster: [Nome Cluster 2]
 
         return output.getvalue(), domains_df, page_type_df, domain_page_types_df, clustering_df
 
+def save_checkpoint(data, checkpoint_name):
+    """Salva un checkpoint dei dati"""
+    try:
+        with open(f"{checkpoint_name}.pkl", 'wb') as f:
+            pickle.dump(data, f)
+        return True
+    except Exception as e:
+        st.error(f"Errore nel salvataggio checkpoint: {e}")
+        return False
+
+def load_checkpoint(checkpoint_name):
+    """Carica un checkpoint dei dati"""
+    try:
+        if os.path.exists(f"{checkpoint_name}.pkl"):
+            with open(f"{checkpoint_name}.pkl", 'rb') as f:
+                return pickle.load(f)
+    except Exception as e:
+        st.error(f"Errore nel caricamento checkpoint: {e}")
+    return None
+
+def process_batch_queries(analyzer, queries_batch, country, language, num_results, 
+                         all_domains, query_page_types, domain_page_types, 
+                         domain_occurences, paa_questions, related_queries,
+                         paa_to_queries, related_to_queries, paa_to_domains):
+    """Processa un batch di query"""
+    for query in queries_batch:
+        results = analyzer.fetch_serp_results(query, country, language, num_results)
+        
+        if results:
+            (domain_page_types_query, domain_occurences_query, query_page_types_query,
+             paa_questions_query, related_queries_query, paa_to_queries_query,
+             related_to_queries_query, paa_to_domains_query) = analyzer.parse_results(results, query)
+            
+            # Aggiorna i dati globali
+            for domain, page_types in domain_page_types_query.items():
+                for page_type, count in page_types.items():
+                    domain_page_types[domain][page_type] += count
+            
+            for domain, count in domain_occurences_query.items():
+                domain_occurences[domain] += count
+            
+            for query_key, page_types in query_page_types_query.items():
+                query_page_types[query_key].extend(page_types)
+            
+            paa_questions.extend(paa_questions_query)
+            related_queries.extend(related_queries_query)
+            paa_to_queries.update(paa_to_queries_query)
+            related_to_queries.update(related_to_queries_query)
+            paa_to_domains.update(paa_to_domains_query)
+            all_domains.extend(domain_page_types_query.keys())
+            
+            # Libera memoria
+            del results
+            gc.collect()
+
 def main():
     st.markdown('<h1 class="main-header">🔍 SERP Analyzer Pro</h1>', unsafe_allow_html=True)
     st.markdown("---")
+
+    # Inizializza session state per checkpoint
+    if 'checkpoint_data' not in st.session_state:
+        st.session_state.checkpoint_data = None
+    if 'processed_queries' not in st.session_state:
+        st.session_state.processed_queries = set()
 
     st.sidebar.header("⚙️ Configurazione")
     
@@ -665,6 +753,54 @@ def main():
         value=5,
         help="Pagine da classificare insieme (più alto = più veloce)"
     ) if use_ai_classification else 1
+
+    # Opzioni avanzate per grandi volumi
+    st.sidebar.subheader("🔧 Opzioni Avanzate")
+    
+    enable_checkpoints = st.sidebar.checkbox(
+        "Abilita checkpoint automatici",
+        value=True,
+        help="Salva progressi ogni N query per recupero in caso di errori"
+    )
+    
+    checkpoint_frequency = st.sidebar.number_input(
+        "Frequenza checkpoint (query)",
+        min_value=10,
+        max_value=100,
+        value=50,
+        help="Salva checkpoint ogni N query processate"
+    ) if enable_checkpoints else 50
+    
+    batch_processing = st.sidebar.checkbox(
+        "Elaborazione a batch",
+        value=True,
+        help="Processa query in batch per migliore gestione memoria"
+    )
+    
+    queries_per_batch = st.sidebar.number_input(
+        "Query per batch",
+        min_value=10,
+        max_value=100,
+        value=25,
+        help="Numero di query da processare per batch"
+    ) if batch_processing else 25
+
+    # Gestione checkpoint esistenti
+    if enable_checkpoints:
+        st.sidebar.subheader("📁 Checkpoint")
+        checkpoint_files = [f for f in os.listdir('.') if f.endswith('.pkl') and f.startswith('serp_checkpoint_')]
+        
+        if checkpoint_files:
+            selected_checkpoint = st.sidebar.selectbox(
+                "Carica checkpoint esistente",
+                ["Nessuno"] + checkpoint_files
+            )
+            
+            if selected_checkpoint != "Nessuno" and st.sidebar.button("Carica Checkpoint"):
+                checkpoint_data = load_checkpoint(selected_checkpoint.replace('.pkl', ''))
+                if checkpoint_data:
+                    st.session_state.checkpoint_data = checkpoint_data
+                    st.success(f"✅ Checkpoint caricato: {len(checkpoint_data.get('processed_queries', []))} query già processate")
 
     st.header("📝 Inserisci le Query")
     
@@ -726,6 +862,12 @@ def main():
             st.error("⚠️ Massimo 1000 query per volta!")
             return
 
+        # Rimuovi query già processate se caricate da checkpoint
+        if st.session_state.checkpoint_data:
+            processed = st.session_state.checkpoint_data.get('processed_queries', set())
+            queries = [q for q in queries if q not in processed]
+            st.info(f"📊 Riprendendo analisi: {len(queries)} query rimanenti da processare")
+
         custom_clusters = []
         if enable_keyword_clustering and 'custom_clusters_input' in locals() and custom_clusters_input.strip():
             custom_clusters = [c.strip() for c in custom_clusters_input.strip().split('\n') if c.strip()]
@@ -740,8 +882,34 @@ def main():
         analyzer.use_ai = use_ai_classification
         analyzer.batch_size = batch_size
         
-        keyword_clusters = {}
-        if enable_keyword_clustering and (use_ai_classification or len(queries) > 0):
+        # Inizializza o carica dati da checkpoint
+        if st.session_state.checkpoint_data:
+            all_domains = st.session_state.checkpoint_data.get('all_domains', [])
+            query_page_types = st.session_state.checkpoint_data.get('query_page_types', defaultdict(list))
+            domain_page_types = st.session_state.checkpoint_data.get('domain_page_types', defaultdict(lambda: defaultdict(int)))
+            domain_occurences = st.session_state.checkpoint_data.get('domain_occurences', defaultdict(int))
+            paa_questions = st.session_state.checkpoint_data.get('paa_questions', [])
+            related_queries = st.session_state.checkpoint_data.get('related_queries', [])
+            paa_to_queries = st.session_state.checkpoint_data.get('paa_to_queries', defaultdict(set))
+            related_to_queries = st.session_state.checkpoint_data.get('related_to_queries', defaultdict(set))
+            paa_to_domains = st.session_state.checkpoint_data.get('paa_to_domains', defaultdict(set))
+            processed_queries = st.session_state.checkpoint_data.get('processed_queries', set())
+            keyword_clusters = st.session_state.checkpoint_data.get('keyword_clusters', {})
+        else:
+            all_domains = []
+            query_page_types = defaultdict(list)
+            domain_page_types = defaultdict(lambda: defaultdict(int))
+            domain_occurences = defaultdict(int)
+            paa_questions = []
+            related_queries = []
+            paa_to_queries = defaultdict(set)
+            related_to_queries = defaultdict(set)
+            paa_to_domains = defaultdict(set)
+            processed_queries = set()
+            keyword_clusters = {}
+        
+        # Clustering keyword (se non già fatto)
+        if enable_keyword_clustering and not keyword_clusters:
             status_text = st.empty()
             
             if custom_clusters:
@@ -749,26 +917,6 @@ def main():
                 try:
                     keyword_clusters = analyzer.cluster_keywords_with_custom(queries, custom_clusters)
                     st.success(f"✅ Cluster creati: {len(keyword_clusters)} (inclusi {len([k for k in keyword_clusters.keys() if k in custom_clusters])} personalizzati)")
-                    
-                    with st.expander("👀 Preview Clustering Personalizzato"):
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            st.write("**Cluster Personalizzati Utilizzati:**")
-                            for cluster_name in custom_clusters:
-                                if cluster_name in keyword_clusters and keyword_clusters[cluster_name]:
-                                    st.write(f"✅ **{cluster_name}** ({len(keyword_clusters[cluster_name])} keyword)")
-                                else:
-                                    st.write(f"⚪ **{cluster_name}** (nessuna keyword assegnata)")
-                        
-                        with col2:
-                            st.write("**Cluster Aggiuntivi Creati:**")
-                            additional_clusters = [k for k in keyword_clusters.keys() if k not in custom_clusters]
-                            for cluster_name in additional_clusters[:5]:
-                                st.write(f"🆕 **{cluster_name}** ({len(keyword_clusters[cluster_name])} keyword)")
-                            if len(additional_clusters) > 5:
-                                st.write(f"... e altri {len(additional_clusters) - 5} cluster")
-                
                 except Exception as e:
                     st.warning(f"Errore durante il clustering personalizzato: {e}")
                     keyword_clusters = {}
@@ -777,12 +925,6 @@ def main():
                 try:
                     keyword_clusters = analyzer.cluster_keywords_semantic(queries)
                     st.success(f"✅ Identificati {len(keyword_clusters)} cluster semantici!")
-                    
-                    with st.expander("👀 Preview Clustering Automatico"):
-                        for cluster_name, keywords in list(keyword_clusters.items())[:3]:
-                            st.write(f"**{cluster_name}** ({len(keywords)} keyword)")
-                            st.write(", ".join(keywords[:10]) + ("..." if len(keywords) > 10 else ""))
-                
                 except Exception as e:
                     st.warning(f"Errore durante il clustering: {e}")
                     keyword_clusters = {}
@@ -790,202 +932,300 @@ def main():
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        all_domains = []
-        query_page_types = defaultdict(list)
-        domain_page_types = defaultdict(lambda: defaultdict(int))
-        domain_occurences = defaultdict(int)
-        paa_questions = []
-        related_queries = []
-        paa_to_queries = defaultdict(set)
-        related_to_queries = defaultdict(set)
-        paa_to_domains = defaultdict(set)
-
-        for i, query in enumerate(queries):
-            status_text.text(f"🔍 Analizzando: {query} ({i+1}/{len(queries)})")
-            
-            results = analyzer.fetch_serp_results(query, country, language, num_results)
-            
-            if results:
-                (domain_page_types_query, domain_occurences_query, query_page_types_query,
-                 paa_questions_query, related_queries_query, paa_to_queries_query,
-                 related_to_queries_query, paa_to_domains_query) = analyzer.parse_results(results, query)
-                
-                for domain, page_types in domain_page_types_query.items():
-                    for page_type, count in page_types.items():
-                        domain_page_types[domain][page_type] += count
-                
-                for domain, count in domain_occurences_query.items():
-                    domain_occurences[domain] += count
-                
-                for query_key, page_types in query_page_types_query.items():
-                    query_page_types[query_key].extend(page_types)
-                
-                paa_questions.extend(paa_questions_query)
-                related_queries.extend(related_queries_query)
-                paa_to_queries.update(paa_to_queries_query)
-                related_to_queries.update(related_to_queries_query)
-                paa_to_domains.update(paa_to_domains_query)
-                all_domains.extend(domain_page_types_query.keys())
-            
-            progress_bar.progress((i + 1) / len(queries))
-            
-            sleep_time = 0.5 if not use_ai_classification else 1.0
-            time.sleep(sleep_time)
-
-        status_text.text("✅ Analisi completata! Generazione report...")
-
-        domains_counter = Counter(all_domains)
-        excel_data, domains_df, page_type_df, domain_page_types_df, clustering_df = analyzer.create_excel_report(
-            domains_counter, domain_occurences, query_page_types, domain_page_types,
-            paa_questions, related_queries, paa_to_queries, related_to_queries, paa_to_domains, keyword_clusters
-        )
-
-        status_text.text("📊 Visualizzazione risultati...")
-
-        st.markdown("---")
-        st.header("📊 Risultati Analisi")
-
-        col1, col2, col3, col4 = st.columns(4)
+        # Container per metriche in tempo reale
+        metrics_container = st.container()
+        with metrics_container:
+            col1, col2, col3, col4 = st.columns(4)
+            metric_queries = col1.empty()
+            metric_domains = col2.empty()
+            metric_paa = col3.empty()
+            metric_errors = col4.empty()
         
-        with col1:
-            st.metric("Query Analizzate", len(queries))
-        with col2:
-            st.metric("Domini Trovati", len(domains_counter))
-        with col3:
-            st.metric("PAA Questions", len(set(paa_questions)))
-        with col4:
-            cluster_count = len(keyword_clusters) if keyword_clusters else 0
-            st.metric("Cluster Semantici", cluster_count)
-
-        col1, col2 = st.columns(2)
+        total_queries = len(queries)
+        queries_processed = 0
+        errors_count = 0
         
-        with col1:
-            st.subheader("📈 Top Domini")
-            if not domains_df.empty:
-                fig_domains = px.bar(
-                    domains_df.head(10), 
-                    x="Dominio", 
-                    y="Occorrenze",
-                    title="Top 10 Domini per Occorrenze"
-                )
-                fig_domains.update_layout(xaxis_tickangle=-45)
-                st.plotly_chart(fig_domains, use_container_width=True)
-
-        with col2:
-            st.subheader("🏷️ Distribuzione Tipologie")
-            if not page_type_df.empty:
-                fig_pie = px.pie(
-                    page_type_df, 
-                    values="Occorrenze", 
-                    names="Tipologia Pagina",
-                    title="Tipologie di Pagine"
-                )
-                st.plotly_chart(fig_pie, use_container_width=True)
-
-        if keyword_clusters:
-            st.subheader("🧠 Analisi Cluster Semantici")
+        try:
+            # Processa query in batch
+            if batch_processing:
+                for batch_start in range(0, len(queries), queries_per_batch):
+                    batch_end = min(batch_start + queries_per_batch, len(queries))
+                    batch_queries = queries[batch_start:batch_end]
+                    
+                    status_text.text(f"🔄 Processando batch {batch_start//queries_per_batch + 1}/{(len(queries)-1)//queries_per_batch + 1}")
+                    
+                    # Processa il batch
+                    for i, query in enumerate(batch_queries):
+                        if query in processed_queries:
+                            continue
+                            
+                        status_text.text(f"🔍 Analizzando: {query} ({queries_processed+1}/{total_queries})")
+                        
+                        try:
+                            results = analyzer.fetch_serp_results(query, country, language, num_results)
+                            
+                            if results:
+                                (domain_page_types_query, domain_occurences_query, query_page_types_query,
+                                 paa_questions_query, related_queries_query, paa_to_queries_query,
+                                 related_to_queries_query, paa_to_domains_query) = analyzer.parse_results(results, query)
+                                
+                                # Aggiorna i dati
+                                for domain, page_types in domain_page_types_query.items():
+                                    for page_type, count in page_types.items():
+                                        domain_page_types[domain][page_type] += count
+                                
+                                for domain, count in domain_occurences_query.items():
+                                    domain_occurences[domain] += count
+                                
+                                for query_key, page_types in query_page_types_query.items():
+                                    query_page_types[query_key].extend(page_types)
+                                
+                                paa_questions.extend(paa_questions_query)
+                                related_queries.extend(related_queries_query)
+                                paa_to_queries.update(paa_to_queries_query)
+                                related_to_queries.update(related_to_queries_query)
+                                paa_to_domains.update(paa_to_domains_query)
+                                all_domains.extend(domain_page_types_query.keys())
+                                
+                                processed_queries.add(query)
+                                queries_processed += 1
+                            else:
+                                errors_count += 1
+                        
+                        except Exception as e:
+                            st.warning(f"Errore processando '{query}': {e}")
+                            errors_count += 1
+                        
+                        # Aggiorna metriche
+                        metric_queries.metric("Query Processate", f"{queries_processed}/{total_queries}")
+                        metric_domains.metric("Domini Trovati", len(set(all_domains)))
+                        metric_paa.metric("PAA Questions", len(set(paa_questions)))
+                        metric_errors.metric("Errori", errors_count)
+                        
+                        progress_bar.progress(queries_processed / total_queries)
+                        
+                        # Salva checkpoint se necessario
+                        if enable_checkpoints and queries_processed % checkpoint_frequency == 0:
+                            checkpoint_data = {
+                                'all_domains': all_domains,
+                                'query_page_types': dict(query_page_types),
+                                'domain_page_types': dict(domain_page_types),
+                                'domain_occurences': dict(domain_occurences),
+                                'paa_questions': paa_questions,
+                                'related_queries': related_queries,
+                                'paa_to_queries': dict(paa_to_queries),
+                                'related_to_queries': dict(related_to_queries),
+                                'paa_to_domains': dict(paa_to_domains),
+                                'processed_queries': processed_queries,
+                                'keyword_clusters': keyword_clusters
+                            }
+                            
+                            checkpoint_name = f"serp_checkpoint_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                            if save_checkpoint(checkpoint_data, checkpoint_name):
+                                status_text.text(f"💾 Checkpoint salvato: {checkpoint_name}")
+                        
+                        # Attesa tra query
+                        sleep_time = 0.5 if not use_ai_classification else 1.0
+                        time.sleep(sleep_time)
+                    
+                    # Libera memoria dopo ogni batch
+                    gc.collect()
             
-            cluster_sizes = {name: len(keywords) for name, keywords in keyword_clusters.items()}
-            cluster_df = pd.DataFrame(list(cluster_sizes.items()), columns=["Cluster", "Numero Keyword"])
-            
-            fig_clusters = px.bar(
-                cluster_df.sort_values("Numero Keyword", ascending=False),
-                x="Cluster",
-                y="Numero Keyword", 
-                title="Distribuzione Keyword per Cluster"
+            else:
+                # Modalità standard (non batch)
+                for i, query in enumerate(queries):
+                    if query in processed_queries:
+                        continue
+                        
+                    status_text.text(f"🔍 Analizzando: {query} ({i+1}/{len(queries)})")
+                    
+                    try:
+                        results = analyzer.fetch_serp_results(query, country, language, num_results)
+                        
+                        if results:
+                            (domain_page_types_query, domain_occurences_query, query_page_types_query,
+                             paa_questions_query, related_queries_query, paa_to_queries_query,
+                             related_to_queries_query, paa_to_domains_query) = analyzer.parse_results(results, query)
+                            
+                            for domain, page_types in domain_page_types_query.items():
+                                for page_type, count in page_types.items():
+                                    domain_page_types[domain][page_type] += count
+                            
+                            for domain, count in domain_occurences_query.items():
+                                domain_occurences[domain] += count
+                            
+                            for query_key, page_types in query_page_types_query.items():
+                                query_page_types[query_key].extend(page_types)
+                            
+                            paa_questions.extend(paa_questions_query)
+                            related_queries.extend(related_queries_query)
+                            paa_to_queries.update(paa_to_queries_query)
+                            related_to_queries.update(related_to_queries_query)
+                            paa_to_domains.update(paa_to_domains_query)
+                            all_domains.extend(domain_page_types_query.keys())
+                            
+                            processed_queries.add(query)
+                            queries_processed += 1
+                    
+                    except Exception as e:
+                        st.warning(f"Errore processando '{query}': {e}")
+                        errors_count += 1
+                    
+                    progress_bar.progress((i + 1) / len(queries))
+                    
+                    sleep_time = 0.5 if not use_ai_classification else 1.0
+                    time.sleep(sleep_time)
+
+            status_text.text("✅ Analisi completata! Generazione report...")
+
+            # Generazione report finale
+            domains_counter = Counter(all_domains)
+            excel_data, domains_df, page_type_df, domain_page_types_df, clustering_df = analyzer.create_excel_report(
+                domains_counter, domain_occurences, query_page_types, domain_page_types,
+                paa_questions, related_queries, paa_to_queries, related_to_queries, paa_to_domains, keyword_clusters
             )
-            fig_clusters.update_layout(xaxis_tickangle=-45)
-            st.plotly_chart(fig_clusters, use_container_width=True)
 
-        st.subheader("📋 Tabelle Dettagliate")
-        
-        tabs = ["Top Domini", "Tipologie Pagine", "Competitor Analysis"]
-        if keyword_clusters:
-            tabs.append("Keyword Clustering")
-        
-        if len(tabs) == 4:
-            tab1, tab2, tab3, tab4 = st.tabs(tabs)
-        else:
-            tab1, tab2, tab3 = st.tabs(tabs)
-            tab4 = None
-        
-        with tab1:
-            st.dataframe(domains_df, use_container_width=True)
-        
-        with tab2:
-            st.dataframe(page_type_df, use_container_width=True)
-        
-        with tab3:
-            st.dataframe(domain_page_types_df, use_container_width=True)
-        
-        if tab4 and not clustering_df.empty:
-            with tab4:
-                st.dataframe(clustering_df, use_container_width=True)
-                
-                st.subheader("🔍 Dettagli Cluster")
-                
-                if custom_clusters:
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.write("**Cluster Personalizzati:**")
-                        personal_clusters = [k for k in keyword_clusters.keys() if k in custom_clusters and keyword_clusters[k]]
-                        if personal_clusters:
-                            selected_personal = st.selectbox(
-                                "Seleziona cluster personalizzato:",
-                                options=personal_clusters,
-                                key="personal_cluster"
-                            )
-                        else:
-                            st.write("Nessun cluster personalizzato con keyword")
-                            selected_personal = None
-                    
-                    with col2:
-                        st.write("**Cluster Automatici:**")
-                        auto_clusters = [k for k in keyword_clusters.keys() if k not in custom_clusters]
-                        if auto_clusters:
-                            selected_auto = st.selectbox(
-                                "Seleziona cluster automatico:",
-                                options=auto_clusters,
-                                key="auto_cluster"
-                            )
-                        else:
-                            st.write("Nessun cluster automatico creato")
-                            selected_auto = None
-                    
-                    selected_cluster = selected_personal or selected_auto
-                else:
-                    selected_cluster = st.selectbox(
-                        "Seleziona un cluster per vedere i dettagli:",
-                        options=list(keyword_clusters.keys())
+            status_text.text("📊 Visualizzazione risultati...")
+
+            st.markdown("---")
+            st.header("📊 Risultati Analisi")
+
+            # Visualizzazioni
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("📈 Top Domini")
+                if not domains_df.empty:
+                    fig_domains = px.bar(
+                        domains_df.head(10), 
+                        x="Dominio", 
+                        y="Occorrenze",
+                        title="Top 10 Domini per Occorrenze"
                     )
+                    fig_domains.update_layout(xaxis_tickangle=-45)
+                    st.plotly_chart(fig_domains, use_container_width=True)
+
+            with col2:
+                st.subheader("🏷️ Distribuzione Tipologie")
+                if not page_type_df.empty:
+                    fig_pie = px.pie(
+                        page_type_df, 
+                        values="Occorrenze", 
+                        names="Tipologia Pagina",
+                        title="Tipologie di Pagine"
+                    )
+                    st.plotly_chart(fig_pie, use_container_width=True)
+
+            if keyword_clusters:
+                st.subheader("🧠 Analisi Cluster Semantici")
                 
-                if selected_cluster and selected_cluster in keyword_clusters:
-                    cluster_keywords = keyword_clusters[selected_cluster]
-                    cluster_type = "Personalizzato" if selected_cluster in custom_clusters else "Automatico"
-                    
-                    st.write(f"**{selected_cluster}** ({cluster_type}) - {len(cluster_keywords)} keyword:")
-                    
-                    cols = st.columns(3)
-                    for i, keyword in enumerate(cluster_keywords):
-                        with cols[i % 3]:
-                            st.write(f"• {keyword}")
+                cluster_sizes = {name: len(keywords) for name, keywords in keyword_clusters.items()}
+                cluster_df = pd.DataFrame(list(cluster_sizes.items()), columns=["Cluster", "Numero Keyword"])
+                
+                fig_clusters = px.bar(
+                    cluster_df.sort_values("Numero Keyword", ascending=False),
+                    x="Cluster",
+                    y="Numero Keyword", 
+                    title="Distribuzione Keyword per Cluster"
+                )
+                fig_clusters.update_layout(xaxis_tickangle=-45)
+                st.plotly_chart(fig_clusters, use_container_width=True)
 
-        st.subheader("💾 Download Report")
-        st.download_button(
-            label="📥 Scarica Report Excel Completo",
-            data=excel_data,
-            file_name=f"serp_analysis_{time.strftime('%Y%m%d_%H%M%S')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+            # Tabelle
+            st.subheader("📋 Tabelle Dettagliate")
+            
+            tabs = ["Top Domini", "Tipologie Pagine", "Competitor Analysis"]
+            if keyword_clusters:
+                tabs.append("Keyword Clustering")
+            
+            if len(tabs) == 4:
+                tab1, tab2, tab3, tab4 = st.tabs(tabs)
+            else:
+                tab1, tab2, tab3 = st.tabs(tabs)
+                tab4 = None
+            
+            with tab1:
+                st.dataframe(domains_df, use_container_width=True)
+            
+            with tab2:
+                st.dataframe(page_type_df, use_container_width=True)
+            
+            with tab3:
+                st.dataframe(domain_page_types_df, use_container_width=True)
+            
+            if tab4 and not clustering_df.empty:
+                with tab4:
+                    st.dataframe(clustering_df, use_container_width=True)
 
-        progress_bar.empty()
-        status_text.text("🎉 Analisi completata con successo!")
+            # Download
+            st.subheader("💾 Download Report")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.download_button(
+                    label="📥 Scarica Report Excel Completo",
+                    data=excel_data,
+                    file_name=f"serp_analysis_{time.strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            
+            with col2:
+                if enable_checkpoints:
+                    # Salva checkpoint finale
+                    final_checkpoint_data = {
+                        'all_domains': all_domains,
+                        'query_page_types': dict(query_page_types),
+                        'domain_page_types': dict(domain_page_types),
+                        'domain_occurences': dict(domain_occurences),
+                        'paa_questions': paa_questions,
+                        'related_queries': related_queries,
+                        'paa_to_queries': dict(paa_to_queries),
+                        'related_to_queries': dict(related_to_queries),
+                        'paa_to_domains': dict(paa_to_domains),
+                        'processed_queries': processed_queries,
+                        'keyword_clusters': keyword_clusters
+                    }
+                    
+                    checkpoint_name = f"serp_final_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    if st.button("💾 Salva Risultati come Checkpoint"):
+                        if save_checkpoint(final_checkpoint_data, checkpoint_name):
+                            st.success(f"✅ Checkpoint finale salvato: {checkpoint_name}.pkl")
+
+            progress_bar.empty()
+            status_text.text("🎉 Analisi completata con successo!")
+            
+            # Pulisci checkpoint temporanei se completato con successo
+            if enable_checkpoints:
+                st.info("💡 Puoi eliminare i checkpoint temporanei se l'analisi è stata completata con successo.")
+        
+        except Exception as e:
+            st.error(f"❌ Errore durante l'analisi: {e}")
+            
+            # Salva checkpoint di emergenza
+            if enable_checkpoints:
+                emergency_checkpoint_data = {
+                    'all_domains': all_domains,
+                    'query_page_types': dict(query_page_types),
+                    'domain_page_types': dict(domain_page_types),
+                    'domain_occurences': dict(domain_occurences),
+                    'paa_questions': paa_questions,
+                    'related_queries': related_queries,
+                    'paa_to_queries': dict(paa_to_queries),
+                    'related_to_queries': dict(related_to_queries),
+                    'paa_to_domains': dict(paa_to_domains),
+                    'processed_queries': processed_queries,
+                    'keyword_clusters': keyword_clusters
+                }
+                
+                emergency_checkpoint_name = f"serp_emergency_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                if save_checkpoint(emergency_checkpoint_data, emergency_checkpoint_name):
+                    st.warning(f"⚠️ Checkpoint di emergenza salvato: {emergency_checkpoint_name}.pkl")
+                    st.info(f"Processate {len(processed_queries)} query prima dell'errore. Puoi riprendere l'analisi caricando il checkpoint.")
 
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #666;'>
-        <p>SEO SERP Analyzer PRO - Ottieni più informazioni dalle tue analisi keyword - Sviluppato da Daniele Pisciottano e il suo amico Claude 🦕</p>
+        <p>SEO SERP Analyzer PRO v2.0 - Ottimizzato per grandi volumi - Sviluppato da Daniele Pisciottano e il suo amico Claude 🦕</p>
     </div>
     """, unsafe_allow_html=True)
 
