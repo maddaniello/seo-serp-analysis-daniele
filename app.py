@@ -713,14 +713,14 @@ def main():
     st.sidebar.subheader("🌍 Parametri di Ricerca")
     country = st.sidebar.selectbox(
         "Paese",
-        ["it", "us", "uk", "de", "fr", "es"],
+        ["it", "us", "uk", "de", "fr", "es", "pl", "mx"],
         index=0,
         help="Seleziona il paese per la ricerca"
     )
     
     language = st.sidebar.selectbox(
         "Lingua",
-        ["it", "en", "de", "fr", "es"],
+        ["it", "en", "de", "fr", "es", "pl"],
         index=0,
         help="Seleziona la lingua dei risultati"
     )
